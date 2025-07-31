@@ -1,0 +1,12 @@
+{
+  "name": "@componentor/opfs-fs",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Componentor",
+  "license": "MIT",
+  "description": "FS Replacement for isomorphic-git"
+}
