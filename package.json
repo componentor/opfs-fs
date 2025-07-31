@@ -1,12 +1,28 @@
 {
   "name": "@componentor/opfs-fs",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "description": "OPFS-based FS implementation for isomorphic-git",
   "main": "index.js",
   "type": "module",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/componentor/opfs-fs.git"
   },
   "author": "Componentor",
   "license": "MIT",
-  "description": "FS Replacement for isomorphic-git"
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "opfs",
+    "fs",
+    "isomorphic-git",
+    "filesystem",
+    "browser",
+    "web"
+  ],
+  "bugs": {
+    "url": "https://github.com/componentor/opfs-fs/issues"
+  },
+  "homepage": "https://github.com/componentor/opfs-fs#readme"
 }
