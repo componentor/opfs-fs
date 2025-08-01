@@ -170,6 +170,7 @@ export default class OPFS {
       return {
         type: 'dir',
         size: 0,
+        mtime: new Date(0),
         mtimeMs: 0,
         isFile: () => false,
         isDirectory: () => true
@@ -191,9 +192,11 @@ export default class OPFS {
     try {
       const fileHandle = await dir.getFileHandle(name)
       const file = await fileHandle.getFile()
+      const mtime = new Date(file.lastModified)
       return {
         type: 'file',
         size: file.size,
+        mtime,
         mtimeMs: file.lastModified,
         isFile: () => true,
         isDirectory: () => false
@@ -204,6 +207,7 @@ export default class OPFS {
         return {
           type: 'dir',
           size: 0,
+          mtime: new Date(0),
           mtimeMs: 0,
           isFile: () => false,
           isDirectory: () => true

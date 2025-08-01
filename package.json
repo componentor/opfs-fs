@@ -1,6 +1,6 @@
 {
   "name": "@componentor/opfs-fs",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "OPFS-based FS implementation for isomorphic-git",
   "main": "index.js",
   "type": "module",
