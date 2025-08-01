@@ -34,9 +34,9 @@ export default class OPFS {
     for (let i = 0; i < parts.length - 1; i++) {
       try {
         dir = await dir.getDirectoryHandle(parts[i], { create: opts.create })
-      } catch {
+      } catch (err) {
         if (!opts.create) throw this._enoent(path)
-        throw
+        throw err
       }
     }
     const name = parts[parts.length - 1]
