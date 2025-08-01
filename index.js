@@ -22,23 +22,36 @@ export default class OPFS {
     }
   }
 
+  _enoent(path) {
+    const err = new Error(`ENOENT: No such file or directory, ${path}`)
+    err.code = 'ENOENT'
+    return err
+  }
+
   async _getHandle(path, opts = {}) {
     const parts = path.split('/').filter(Boolean)
     let dir = await this.rootPromise
     for (let i = 0; i < parts.length - 1; i++) {
-      dir = await dir.getDirectoryHandle(parts[i], { create: opts.create })
+      try {
+        dir = await dir.getDirectoryHandle(parts[i], { create: opts.create })
+      } catch {
+        if (!opts.create) throw this._enoent(path)
+        throw
+      }
     }
     const name = parts[parts.length - 1]
-    return {
-      dir,
-      name,
-      fileHandle: await dir.getFileHandle(name, { create: opts.create }).catch(() => null)
+    try {
+      const fileHandle = await dir.getFileHandle(name, { create: opts.create })
+      return { dir, name, fileHandle }
+    } catch {
+      if (!opts.create) return { dir, name, fileHandle: null }
+      throw this._enoent(path)
     }
   }
 
   async readFile(path, options = {}) {
     const { fileHandle } = await this._getHandle(path)
-    if (!fileHandle) throw new Error(`ENOENT: No such file ${path}`)
+    if (!fileHandle) throw this._enoent(path)
 
     if (this.useSync) {
       const access = await fileHandle.createSyncAccessHandle()
@@ -87,22 +100,40 @@ export default class OPFS {
     const name = parts.pop()
     let dir = await this.rootPromise
     for (const part of parts) {
-      dir = await dir.getDirectoryHandle(part)
+      try {
+        dir = await dir.getDirectoryHandle(part)
+      } catch {
+        throw this._enoent(path)
+      }
     }
-    await dir.removeEntry(name, { recursive: true })
+    try {
+      await dir.removeEntry(name, { recursive: true })
+    } catch {
+      throw this._enoent(path)
+    }
   }
 
   async unlink(path) {
-    const { dir, name } = await this._getHandle(path)
-    await dir.removeEntry(name)
+    const { dir, name, fileHandle } = await this._getHandle(path)
+    if (!fileHandle) throw this._enoent(path)
+    try {
+      await dir.removeEntry(name)
+    } catch {
+      throw this._enoent(path)
+    }
   }
 
   async readdir(path) {
     const parts = path.split('/').filter(Boolean)
     let dir = await this.rootPromise
-    for (const part of parts) {
-      dir = await dir.getDirectoryHandle(part)
+    try {
+      for (const part of parts) {
+        dir = await dir.getDirectoryHandle(part)
+      }
+    } catch {
+      throw this._enoent(path)
     }
+
     const entries = []
     for await (const [name] of dir.entries()) {
       entries.push(name)
@@ -112,7 +143,7 @@ export default class OPFS {
 
   async stat(path) {
     const { fileHandle } = await this._getHandle(path)
-    if (!fileHandle) throw new Error(`ENOENT: No such file ${path}`)
+    if (!fileHandle) throw this._enoent(path)
     const file = await fileHandle.getFile()
     return {
       size: file.size,
@@ -128,31 +159,34 @@ export default class OPFS {
     await this.unlink(oldPath)
   }
 
-  // --- Additional stubs ---
-
-  async lstat(filepath, opts) {
-    return this.stat(filepath, opts)
+  async lstat(path) {
+    // For now, same as stat
+    return this.stat(path)
   }
 
   async symlink(target, filepath, opts) {
-    throw new Error('symlink() is not supported in OPFS')
+    const err = new Error('symlink() is not supported in OPFS')
+    err.code = 'ENOTSUP'
+    throw err
   }
 
   async readlink(filepath, opts) {
-    throw new Error('readlink() is not supported in OPFS')
+    const err = new Error('readlink() is not supported in OPFS')
+    err.code = 'ENOTSUP'
+    throw err
   }
 
-  async backFile(filepath, opts) {
-    // Not standard; just return stat info or throw if not found
+  async backFile(path, opts) {
     try {
-      return await this.stat(filepath)
-    } catch {
-      throw new Error(`ENOENT: No such file ${filepath}`)
+      return await this.stat(path)
+    } catch (err) {
+      if (err.code === 'ENOENT') throw err
+      throw this._enoent(path)
     }
   }
 
-  async du(filepath, opts) {
-    const stat = await this.stat(filepath)
-    return { filepath, size: stat.size }
+  async du(path, opts) {
+    const stat = await this.stat(path)
+    return { path, size: stat.size }
   }
 }
