@@ -2,6 +2,24 @@ export default class OPFS {
   constructor({ useSync = true } = {}) {
     this.useSync = useSync && 'createSyncAccessHandle' in FileSystemFileHandle
     this.rootPromise = navigator.storage.getDirectory()
+
+    for (const method of [
+      'readFile',
+      'writeFile',
+      'mkdir',
+      'rmdir',
+      'unlink',
+      'readdir',
+      'stat',
+      'rename',
+      'lstat',
+      'symlink',
+      'readlink',
+      'backFile',
+      'du'
+    ]) {
+      this[method] = this[method].bind(this)
+    }
   }
 
   async _getHandle(path, opts = {}) {
@@ -108,5 +126,33 @@ export default class OPFS {
     const data = await this.readFile(oldPath)
     await this.writeFile(newPath, data)
     await this.unlink(oldPath)
+  }
+
+  // --- Additional stubs ---
+
+  async lstat(filepath, opts) {
+    return this.stat(filepath, opts)
+  }
+
+  async symlink(target, filepath, opts) {
+    throw new Error('symlink() is not supported in OPFS')
+  }
+
+  async readlink(filepath, opts) {
+    throw new Error('readlink() is not supported in OPFS')
+  }
+
+  async backFile(filepath, opts) {
+    // Not standard; just return stat info or throw if not found
+    try {
+      return await this.stat(filepath)
+    } catch {
+      throw new Error(`ENOENT: No such file ${filepath}`)
+    }
+  }
+
+  async du(filepath, opts) {
+    const stat = await this.stat(filepath)
+    return { filepath, size: stat.size }
   }
 }
