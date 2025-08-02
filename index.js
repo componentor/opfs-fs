@@ -3,6 +3,7 @@ export default class OPFS {
     this.useSync = useSync && 'createSyncAccessHandle' in FileSystemFileHandle
     this.verbose = verbose
     this.rootPromise = navigator.storage.getDirectory()
+    this._dirCache = new Map()
 
     for (const method of [
       'readFile',
@@ -37,17 +38,36 @@ export default class OPFS {
 
   _normalize(path) {
     if (typeof path !== 'string') throw new TypeError('Expected string path')
-    const normalized = '/' + path.replace(/^\/+/, '').replace(/\/+/g, '/')
-    if (normalized.startsWith('//')) {
-      console.warn('[OPFS] Double slash normalized path input:', path)
+
+    const parts = path.split('/')
+    const stack = []
+
+    for (const part of parts) {
+      if (part === '' || part === '.') {
+        continue
+      } else if (part === '..') {
+        if (stack.length > 0) stack.pop()
+      } else {
+        stack.push(part)
+      }
     }
-    return normalized
+
+    return '/' + stack.join('/')
   }
 
   _enoent(path) {
     const err = new Error(`ENOENT: No such file or directory, ${path}`)
     err.code = 'ENOENT'
     return err
+  }
+
+  _clearDirCache(path = '') {
+    path = this._normalize(path)
+    for (const key of this._dirCache.keys()) {
+      if (key === path || key.startsWith(path + '/')) {
+        this._dirCache.delete(key)
+      }
+    }
   }
 
   async _getHandle(path, opts = {}) {
@@ -105,6 +125,8 @@ export default class OPFS {
 
   async writeFile(path, data, options = {}) {
     path = this._normalize(path)
+    this._clearDirCache(path)
+
     const { fileHandle } = await this._getHandle(path, { create: true })
     const buffer = typeof data === 'string' ? new TextEncoder().encode(data) : data
 
@@ -122,25 +144,32 @@ export default class OPFS {
 
   async mkdir(path) {
     path = this._normalize(path)
+    this._clearDirCache(path)
+
     const parts = path.split('/').filter(Boolean)
     let dir = await this.rootPromise
     for (const part of parts) {
-      dir = await dir.getDirectoryHandle(part, { create: true })
+      const subPath = '/' + parts.slice(0, parts.indexOf(part) + 1).join('/')
+      if (this._dirCache.has(subPath)) {
+        dir = this._dirCache.get(subPath)
+      } else {
+        dir = await dir.getDirectoryHandle(part, { create: true })
+        this._dirCache.set(subPath, dir)
+      }
     }
   }
 
   async rmdir(path) {
     path = this._normalize(path)
+    this._clearDirCache(path)
+
     const parts = path.split('/').filter(Boolean)
     const name = parts.pop()
     let dir = await this.rootPromise
     for (const part of parts) {
-      try {
-        dir = await dir.getDirectoryHandle(part)
-      } catch {
-        throw this._enoent(path)
-      }
+      dir = await dir.getDirectoryHandle(part)
     }
+
     try {
       await dir.removeEntry(name, { recursive: true })
     } catch {
@@ -150,6 +179,8 @@ export default class OPFS {
 
   async unlink(path) {
     path = this._normalize(path)
+    this._clearDirCache(path)
+
     const { dir, name, fileHandle } = await this._getHandle(path)
     if (!fileHandle) throw this._enoent(path)
     try {
@@ -159,40 +190,49 @@ export default class OPFS {
     }
   }
 
-  async readdir(path) {
+  async readdir(path, options = {}) {
     path = this._normalize(path)
     const parts = path.split('/').filter(Boolean)
     let dir = await this.rootPromise
-    try {
-      for (const part of parts) {
-        dir = await dir.getDirectoryHandle(part)
+
+    for (let i = 0; i < parts.length; i++) {
+      const currentPath = '/' + parts.slice(0, i + 1).join('/')
+      if (this._dirCache.has(currentPath)) {
+        dir = this._dirCache.get(currentPath)
+        continue
       }
-    } catch {
-      throw this._enoent(path)
+      dir = await dir.getDirectoryHandle(parts[i])
+      this._dirCache.set(currentPath, dir)
     }
 
     const entries = []
-    for await (const [name] of dir.entries()) {
-      entries.push(name)
+    for await (const [name, handle] of dir.entries()) {
+      if (options.withFileTypes) {
+        entries.push({
+          name,
+          isFile: () => handle.kind === 'file',
+          isDirectory: () => handle.kind === 'directory'
+        })
+      } else {
+        entries.push(name)
+      }
     }
+
     return entries
   }
 
   async stat(path) {
     path = this._normalize(path)
-
-    if (path.startsWith('//')) {
-      console.log(path)
-    }
+    const defaultDate = new Date(0)
 
     if (path === '/' || path === '') {
       return {
         type: 'dir',
         size: 0,
-        mode: 0o040755, // directory with rwxr-xr-x permissions
-        ctime: new Date(0), // change time = meta data change
+        mode: 0o040755,
+        ctime: defaultDate,
         ctimeMs: 0,
-        mtime: new Date(0), // modified time = content change
+        mtime: defaultDate,
         mtimeMs: 0,
         isFile: () => false,
         isDirectory: () => true
@@ -203,56 +243,67 @@ export default class OPFS {
     const name = parts.pop()
     let dir = await this.rootPromise
 
-    for (const part of parts) {
+    for (let i = 0; i < parts.length; i++) {
+      const currentPath = '/' + parts.slice(0, i + 1).join('/')
+      if (this._dirCache.has(currentPath)) {
+        dir = this._dirCache.get(currentPath)
+        continue
+      }
       try {
-        dir = await dir.getDirectoryHandle(part)
+        dir = await dir.getDirectoryHandle(parts[i])
+        this._dirCache.set(currentPath, dir)
       } catch {
         throw this._enoent(path)
       }
     }
 
-    try {
-      const fileHandle = await dir.getFileHandle(name)
+    const [fileResult, dirResult] = await Promise.allSettled([
+      dir.getFileHandle(name),
+      dir.getDirectoryHandle(name)
+    ])
+
+    if (dirResult.status === 'fulfilled') {
+      return {
+        type: 'dir',
+        size: 0,
+        mode: 0o040755,
+        ctime: defaultDate,
+        ctimeMs: 0,
+        mtime: defaultDate,
+        mtimeMs: 0,
+        isFile: () => false,
+        isDirectory: () => true
+      }
+    }
+
+    if (fileResult.status === 'fulfilled') {
+      const fileHandle = fileResult.value
       const file = await fileHandle.getFile()
       let mtime = new Date(file.lastModified ?? Date.now())
-      if (isNaN(mtime.valueOf())) mtime = new Date(0)
+      if (isNaN(mtime.valueOf())) mtime = defaultDate
 
-      const result = {
+      return {
         type: 'file',
         size: file.size,
-        mode: 0o100644, // regular file with rw-r--r-- permissions
-        ctime: mtime, // change time = meta data change
+        mode: 0o100644,
+        ctime: mtime,
         ctimeMs: mtime.getTime(),
-        mtime, // modified time = content change
+        mtime,
         mtimeMs: mtime.getTime(),
         isFile: () => true,
         isDirectory: () => false
       }
-
-      return result
-    } catch {
-      try {
-        await dir.getDirectoryHandle(name)
-        return {
-          type: 'dir',
-          size: 0,
-          mode: 0o040755, // directory with rwxr-xr-x permissions
-          ctime: new Date(0), // change time = meta data change
-          ctimeMs: 0,
-          mtime: new Date(0), // modified time = content change
-          mtimeMs: 0,
-          isFile: () => false,
-          isDirectory: () => true
-        }
-      } catch {
-        throw this._enoent(path)
-      }
     }
+
+    throw this._enoent(path)
   }
 
   async rename(oldPath, newPath) {
     oldPath = this._normalize(oldPath)
     newPath = this._normalize(newPath)
+    this._clearDirCache(oldPath)
+    this._clearDirCache(newPath)
+
     const data = await this.readFile(oldPath)
     await this.writeFile(newPath, data)
     await this.unlink(oldPath)
