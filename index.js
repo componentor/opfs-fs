@@ -28,14 +28,20 @@ export default class OPFS {
           return result
         } catch (err) {
           if (this.verbose) console.error(`[OPFS] ${method} threw error:`, err)
-          // Ensure err.code is always a string
-          if (typeof err.code !== 'string') {
-            err.code = 'UNKNOWN'
-          }
+          if (typeof err.code !== 'string') err.code = 'UNKNOWN'
           throw err
         }
       }
     }
+  }
+
+  _normalize(path) {
+    if (typeof path !== 'string') throw new TypeError('Expected string path')
+    const normalized = '/' + path.replace(/^\/+/, '').replace(/\/+/g, '/')
+    if (normalized.startsWith('//')) {
+      console.warn('[OPFS] Double slash normalized path input:', path)
+    }
+    return normalized
   }
 
   _enoent(path) {
@@ -45,7 +51,8 @@ export default class OPFS {
   }
 
   async _getHandle(path, opts = {}) {
-    const parts = path.split('/').filter(Boolean)
+    const cleanPath = path.replace(/^\/+/, '')
+    const parts = cleanPath.split('/').filter(Boolean)
     let dir = await this.rootPromise
 
     for (let i = 0; i < parts.length - 1; i++) {
@@ -74,6 +81,7 @@ export default class OPFS {
   }
 
   async readFile(path, options = {}) {
+    path = this._normalize(path)
     const { fileHandle } = await this._getHandle(path)
     if (!fileHandle) throw this._enoent(path)
 
@@ -96,6 +104,7 @@ export default class OPFS {
   }
 
   async writeFile(path, data, options = {}) {
+    path = this._normalize(path)
     const { fileHandle } = await this._getHandle(path, { create: true })
     const buffer = typeof data === 'string' ? new TextEncoder().encode(data) : data
 
@@ -112,6 +121,7 @@ export default class OPFS {
   }
 
   async mkdir(path) {
+    path = this._normalize(path)
     const parts = path.split('/').filter(Boolean)
     let dir = await this.rootPromise
     for (const part of parts) {
@@ -120,6 +130,7 @@ export default class OPFS {
   }
 
   async rmdir(path) {
+    path = this._normalize(path)
     const parts = path.split('/').filter(Boolean)
     const name = parts.pop()
     let dir = await this.rootPromise
@@ -138,6 +149,7 @@ export default class OPFS {
   }
 
   async unlink(path) {
+    path = this._normalize(path)
     const { dir, name, fileHandle } = await this._getHandle(path)
     if (!fileHandle) throw this._enoent(path)
     try {
@@ -148,6 +160,7 @@ export default class OPFS {
   }
 
   async readdir(path) {
+    path = this._normalize(path)
     const parts = path.split('/').filter(Boolean)
     let dir = await this.rootPromise
     try {
@@ -166,11 +179,20 @@ export default class OPFS {
   }
 
   async stat(path) {
+    path = this._normalize(path)
+
+    if (path.startsWith('//')) {
+      console.log(path)
+    }
+
     if (path === '/' || path === '') {
       return {
         type: 'dir',
         size: 0,
-        mtime: new Date(0),
+        mode: 0o040755, // directory with rwxr-xr-x permissions
+        ctime: new Date(0), // change time = meta data change
+        ctimeMs: 0,
+        mtime: new Date(0), // modified time = content change
         mtimeMs: 0,
         isFile: () => false,
         isDirectory: () => true
@@ -192,22 +214,32 @@ export default class OPFS {
     try {
       const fileHandle = await dir.getFileHandle(name)
       const file = await fileHandle.getFile()
-      const mtime = new Date(file.lastModified)
-      return {
+      let mtime = new Date(file.lastModified ?? Date.now())
+      if (isNaN(mtime.valueOf())) mtime = new Date(0)
+
+      const result = {
         type: 'file',
         size: file.size,
-        mtime,
-        mtimeMs: file.lastModified,
+        mode: 0o100644, // regular file with rw-r--r-- permissions
+        ctime: mtime, // change time = meta data change
+        ctimeMs: mtime.getTime(),
+        mtime, // modified time = content change
+        mtimeMs: mtime.getTime(),
         isFile: () => true,
         isDirectory: () => false
       }
+
+      return result
     } catch {
       try {
         await dir.getDirectoryHandle(name)
         return {
           type: 'dir',
           size: 0,
-          mtime: new Date(0),
+          mode: 0o040755, // directory with rwxr-xr-x permissions
+          ctime: new Date(0), // change time = meta data change
+          ctimeMs: 0,
+          mtime: new Date(0), // modified time = content change
           mtimeMs: 0,
           isFile: () => false,
           isDirectory: () => true
@@ -219,6 +251,8 @@ export default class OPFS {
   }
 
   async rename(oldPath, newPath) {
+    oldPath = this._normalize(oldPath)
+    newPath = this._normalize(newPath)
     const data = await this.readFile(oldPath)
     await this.writeFile(newPath, data)
     await this.unlink(oldPath)
@@ -241,6 +275,7 @@ export default class OPFS {
   }
 
   async backFile(path) {
+    path = this._normalize(path)
     try {
       return await this.stat(path)
     } catch (err) {
@@ -250,6 +285,7 @@ export default class OPFS {
   }
 
   async du(path) {
+    path = this._normalize(path)
     const stat = await this.stat(path)
     return { path, size: stat.size }
   }
