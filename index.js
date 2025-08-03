@@ -163,6 +163,35 @@ export default class OPFS {
     path = this._normalize(path)
     this._clearDirCache(path)
 
+    const limitConcurrency = async (items, maxConcurrent, taskFn) => {
+      const queue = [...items]
+      const results = []
+      const workers = Array.from({ length: maxConcurrent }).map(async () => {
+        while (queue.length) {
+          const item = queue.shift()
+          results.push(await taskFn(item))
+        }
+      })
+      await Promise.all(workers)
+      return results
+    }
+
+    if (path === '/' || path === '') {
+      const root = await this.rootPromise
+
+      // Collect all entries in root
+      const entries = []
+      for await (const [name] of root.entries()) {
+        entries.push(name)
+      }
+
+      // Delete all entries in controlled concurrency batches
+      await limitConcurrency(entries, 10, (name) =>
+        root.removeEntry(name, { recursive: true })
+      )
+      return
+    }
+
     const parts = path.split('/').filter(Boolean)
     const name = parts.pop()
     let dir = await this.rootPromise
