@@ -29,7 +29,12 @@ export default class OPFS {
           return result
         } catch (err) {
           if (this.verbose) console.error(`[OPFS] ${method} threw error:`, err)
-          if (typeof err.code !== 'string') err.code = 'UNKNOWN'
+          if (typeof err.code !== 'string') {
+            const error = new Error(err.message)
+            error.code = 'UNKNOWN'
+            error.original = err
+            throw error
+          }
           throw err
         }
       }
