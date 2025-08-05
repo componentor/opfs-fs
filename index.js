@@ -245,7 +245,8 @@ export default class OPFS {
         entries.push({
           name,
           isFile: () => handle.kind === 'file',
-          isDirectory: () => handle.kind === 'directory'
+          isDirectory: () => handle.kind === 'directory',
+          isSymbolicLink: () => false
         })
       } else {
         entries.push(name)
@@ -269,7 +270,8 @@ export default class OPFS {
         mtime: defaultDate,
         mtimeMs: 0,
         isFile: () => false,
-        isDirectory: () => true
+        isDirectory: () => true,
+        isSymbolicLink: () => false
       }
     }
 
@@ -306,7 +308,8 @@ export default class OPFS {
         mtime: defaultDate,
         mtimeMs: 0,
         isFile: () => false,
-        isDirectory: () => true
+        isDirectory: () => true,
+        isSymbolicLink: () => false
       }
     }
 
@@ -325,7 +328,8 @@ export default class OPFS {
         mtime,
         mtimeMs: mtime.getTime(),
         isFile: () => true,
-        isDirectory: () => false
+        isDirectory: () => false,
+        isSymbolicLink: () => false
       }
     }
 
