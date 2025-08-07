@@ -41,6 +41,13 @@ export default class OPFS {
     }
   }
 
+  async _ensureParentDir(path) {
+    const parts = path.split('/').filter(Boolean)
+    if (parts.length < 2) return
+    const parentPath = '/' + parts.slice(0, -1).join('/')
+    await this.mkdir(parentPath)
+  }
+
   _normalize(path) {
     if (typeof path !== 'string') throw new TypeError('Expected string path')
 
@@ -339,12 +346,29 @@ export default class OPFS {
   async rename(oldPath, newPath) {
     oldPath = this._normalize(oldPath)
     newPath = this._normalize(newPath)
+
     this._clearDirCache(oldPath)
     this._clearDirCache(newPath)
 
-    const data = await this.readFile(oldPath)
-    await this.writeFile(newPath, data)
-    await this.unlink(oldPath)
+    const stat = await this.stat(oldPath)
+
+    if (stat.isFile()) {
+      const data = await this.readFile(oldPath)
+      await this._ensureParentDir(newPath)
+      await this.writeFile(newPath, data)
+      await this.unlink(oldPath)
+    } else if (stat.isDirectory()) {
+      await this.mkdir(newPath)
+      const entries = await this.readdir(oldPath)
+      for (const entry of entries) {
+        const oldEntry = `${oldPath}/${entry}`
+        const newEntry = `${newPath}/${entry}`
+        await this.rename(oldEntry, newEntry)
+      }
+      await this.rmdir(oldPath)
+    } else {
+      throw new Error(`Unsupported type for rename: ${oldPath}`)
+    }
   }
 
   async lstat(path) {
