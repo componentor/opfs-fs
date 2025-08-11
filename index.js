@@ -123,13 +123,13 @@ export default class OPFS {
       const buffer = new Uint8Array(size)
       access.read(buffer)
       access.close()
-      return options.encoding === 'utf8'
+      return ['utf8', 'utf-8'].includes(options.encoding)
         ? new TextDecoder().decode(buffer)
         : buffer
     } else {
       const file = await fileHandle.getFile()
       const buffer = new Uint8Array(await file.arrayBuffer())
-      return options.encoding === 'utf8'
+      return ['utf8', 'utf-8'].includes(options.encoding)
         ? new TextDecoder().decode(buffer)
         : buffer
     }
