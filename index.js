@@ -123,14 +123,14 @@ export default class OPFS {
       const buffer = new Uint8Array(size)
       access.read(buffer)
       access.close()
-      return ['utf8', 'utf-8'].includes(options.encoding)
-        ? new TextDecoder().decode(buffer)
+      return options.encoding
+        ? new TextDecoder(options.encoding).decode(buffer)
         : buffer
     } else {
       const file = await fileHandle.getFile()
       const buffer = new Uint8Array(await file.arrayBuffer())
-      return ['utf8', 'utf-8'].includes(options.encoding)
-        ? new TextDecoder().decode(buffer)
+      return options.encoding
+        ? new TextDecoder(options.encoding).decode(buffer)
         : buffer
     }
   }
@@ -145,7 +145,12 @@ export default class OPFS {
     if (this.useSync) {
       const access = await fileHandle.createSyncAccessHandle()
       access.truncate(0)
-      access.write(buffer)
+
+      let written = 0
+      while (written < buffer.length) {
+        written += access.write(buffer.subarray(written), { at: written })
+      }
+
       access.close()
     } else {
       const writable = await fileHandle.createWritable()
@@ -323,8 +328,7 @@ export default class OPFS {
     if (fileResult.status === 'fulfilled') {
       const fileHandle = fileResult.value
       const file = await fileHandle.getFile()
-      let mtime = new Date(file.lastModified ?? Date.now())
-      if (isNaN(mtime.valueOf())) mtime = defaultDate
+      const mtime = file.lastModified ? new Date(file.lastModified) : defaultDate
 
       return {
         type: 'file',
