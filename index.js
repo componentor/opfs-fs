@@ -4,6 +4,8 @@ export default class OPFS {
     this.verbose = verbose
     this.rootPromise = navigator.storage.getDirectory()
     this._dirCache = new Map()
+    this._symlinkCache = null
+    this._symlinkFile = '/.opfs-symlinks.json'
 
     for (const method of [
       'readFile',
@@ -82,6 +84,70 @@ export default class OPFS {
     }
   }
 
+  async _loadSymlinks() {
+    if (this._symlinkCache !== null) return this._symlinkCache
+
+    try {
+      const { fileHandle } = await this._getHandle(this._symlinkFile)
+      if (!fileHandle) {
+        this._symlinkCache = {}
+        return this._symlinkCache
+      }
+
+      const file = await fileHandle.getFile()
+      const text = await file.text()
+      this._symlinkCache = JSON.parse(text)
+    } catch {
+      this._symlinkCache = {}
+    }
+
+    return this._symlinkCache
+  }
+
+  async _saveSymlinks() {
+    const data = JSON.stringify(this._symlinkCache, null, 2)
+    const { fileHandle } = await this._getHandle(this._symlinkFile, { create: true })
+    const buffer = new TextEncoder().encode(data)
+
+    if (this.useSync) {
+      const access = await fileHandle.createSyncAccessHandle()
+      access.truncate(0)
+      let written = 0
+      while (written < buffer.length) {
+        written += access.write(buffer.subarray(written), { at: written })
+      }
+      access.close()
+    } else {
+      const writable = await fileHandle.createWritable()
+      await writable.write(buffer)
+      await writable.close()
+    }
+  }
+
+  async _resolveSymlink(path, maxDepth = 10) {
+    const symlinks = await this._loadSymlinks()
+    let currentPath = path
+    let depth = 0
+
+    while (symlinks[currentPath] && depth < maxDepth) {
+      currentPath = symlinks[currentPath]
+      depth++
+    }
+
+    if (depth >= maxDepth) {
+      const err = new Error(`ELOOP: Too many symbolic links, ${path}`)
+      err.code = 'ELOOP'
+      throw err
+    }
+
+    return currentPath
+  }
+
+  async _isSymlink(path) {
+    const symlinks = await this._loadSymlinks()
+    return !!symlinks[path]
+  }
+
   async _getHandle(path, opts = {}) {
     const cleanPath = path.replace(/^\/+/, '')
     const parts = cleanPath.split('/').filter(Boolean)
@@ -114,6 +180,7 @@ export default class OPFS {
 
   async readFile(path, options = {}) {
     path = this._normalize(path)
+    path = await this._resolveSymlink(path)
     const { fileHandle } = await this._getHandle(path)
     if (!fileHandle) throw this._enoent(path)
 
@@ -137,6 +204,7 @@ export default class OPFS {
 
   async writeFile(path, data, options = {}) {
     path = this._normalize(path)
+    path = await this._resolveSymlink(path)
     this._clearDirCache(path)
 
     const { fileHandle } = await this._getHandle(path, { create: true })
@@ -227,6 +295,14 @@ export default class OPFS {
     path = this._normalize(path)
     this._clearDirCache(path)
 
+    const isSymlink = await this._isSymlink(path)
+    if (isSymlink) {
+      const symlinks = await this._loadSymlinks()
+      delete symlinks[path]
+      await this._saveSymlinks()
+      return
+    }
+
     const { dir, name, fileHandle } = await this._getHandle(path)
     if (!fileHandle) throw this._enoent(path)
     try {
@@ -251,17 +327,49 @@ export default class OPFS {
       this._dirCache.set(currentPath, dir)
     }
 
+    const symlinks = await this._loadSymlinks()
     const entries = []
+
     for await (const [name, handle] of dir.entries()) {
+      if (name === this._symlinkFile.replace(/^\/+/, '')) continue
+
+      const entryPath = path === '/' ? `/${name}` : `${path}/${name}`
+      const isSymlink = !!symlinks[entryPath]
+
       if (options.withFileTypes) {
         entries.push({
           name,
-          isFile: () => handle.kind === 'file',
-          isDirectory: () => handle.kind === 'directory',
-          isSymbolicLink: () => false
+          isFile: () => !isSymlink && handle.kind === 'file',
+          isDirectory: () => !isSymlink && handle.kind === 'directory',
+          isSymbolicLink: () => isSymlink
         })
       } else {
         entries.push(name)
+      }
+    }
+
+    for (const [symlinkPath] of Object.entries(symlinks)) {
+      const symlinkParts = symlinkPath.split('/').filter(Boolean)
+      const symlinkParent = '/' + symlinkParts.slice(0, -1).join('/')
+
+      if ((symlinkParent === path || (path === '/' && symlinkParts.length === 1))) {
+        const name = symlinkParts[symlinkParts.length - 1]
+        const alreadyExists = entries.some(e =>
+          typeof e === 'string' ? e === name : e.name === name
+        )
+
+        if (!alreadyExists) {
+          if (options.withFileTypes) {
+            entries.push({
+              name,
+              isFile: () => false,
+              isDirectory: () => false,
+              isSymbolicLink: () => true
+            })
+          } else {
+            entries.push(name)
+          }
+        }
       }
     }
 
@@ -270,6 +378,7 @@ export default class OPFS {
 
   async stat(path) {
     path = this._normalize(path)
+    path = await this._resolveSymlink(path)
     const defaultDate = new Date(0)
 
     if (path === '/' || path === '') {
@@ -354,6 +463,16 @@ export default class OPFS {
     this._clearDirCache(oldPath)
     this._clearDirCache(newPath)
 
+    const isSymlink = await this._isSymlink(oldPath)
+    if (isSymlink) {
+      const symlinks = await this._loadSymlinks()
+      const target = symlinks[oldPath]
+      delete symlinks[oldPath]
+      symlinks[newPath] = target
+      await this._saveSymlinks()
+      return
+    }
+
     const stat = await this.stat(oldPath)
 
     if (stat.isFile()) {
@@ -376,19 +495,66 @@ export default class OPFS {
   }
 
   async lstat(path) {
+    path = this._normalize(path)
+    const isSymlink = await this._isSymlink(path)
+
+    if (isSymlink) {
+      const target = await this.readlink(path)
+      return {
+        type: 'symlink',
+        target,
+        size: target.length,
+        mode: 0o120777,
+        ctime: new Date(0),
+        ctimeMs: 0,
+        mtime: new Date(0),
+        mtimeMs: 0,
+        isFile: () => false,
+        isDirectory: () => false,
+        isSymbolicLink: () => true
+      }
+    }
+
     return this.stat(path)
   }
 
-  async symlink() {
-    const err = new Error('symlink() is not supported in OPFS')
-    err.code = 'ENOTSUP'
-    throw err
+  async symlink(target, path) {
+    path = this._normalize(path)
+    target = this._normalize(target)
+
+    const symlinks = await this._loadSymlinks()
+
+    if (symlinks[path]) {
+      const err = new Error(`EEXIST: File exists, ${path}`)
+      err.code = 'EEXIST'
+      throw err
+    }
+
+    try {
+      await this.stat(path)
+      const err = new Error(`EEXIST: File exists, ${path}`)
+      err.code = 'EEXIST'
+      throw err
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+
+    symlinks[path] = target
+    await this._saveSymlinks()
+    this._clearDirCache(path)
   }
 
-  async readlink() {
-    const err = new Error('readlink() is not supported in OPFS')
-    err.code = 'ENOTSUP'
-    throw err
+  async readlink(path) {
+    path = this._normalize(path)
+    const symlinks = await this._loadSymlinks()
+
+    if (!symlinks[path]) {
+      const err = new Error(`EINVAL: Invalid argument, ${path}`)
+      err.code = 'EINVAL'
+      throw err
+    }
+
+    return symlinks[path]
   }
 
   async backFile(path) {
