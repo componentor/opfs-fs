@@ -381,5 +381,28 @@ describe('Symlink Support', () => {
       const target = await fs.readlink('/link.txt')
       expect(target).toBe('/target.txt')
     })
+
+    it('should create multiple symlinks efficiently with symlinkBatch', async () => {
+      await fs.writeFile('/target1.txt', 'data1')
+      await fs.writeFile('/target2.txt', 'data2')
+      await fs.writeFile('/target3.txt', 'data3')
+
+      await fs.symlinkBatch([
+        { target: '/target1.txt', path: '/link1.txt' },
+        { target: '/target2.txt', path: '/link2.txt' },
+        { target: '/target3.txt', path: '/link3.txt' }
+      ])
+
+      const target1 = await fs.readlink('/link1.txt')
+      const target2 = await fs.readlink('/link2.txt')
+      const target3 = await fs.readlink('/link3.txt')
+
+      expect(target1).toBe('/target1.txt')
+      expect(target2).toBe('/target2.txt')
+      expect(target3).toBe('/target3.txt')
+
+      const content1 = await fs.readFile('/link1.txt', { encoding: 'utf-8' })
+      expect(content1).toBe('data1')
+    })
   })
 })

@@ -6,6 +6,7 @@ export default class OPFS {
     this._dirCache = new Map()
     this._symlinkCache = null
     this._symlinkFile = '/.opfs-symlinks.json'
+    this._symlinksDirty = false
 
     for (const method of [
       'readFile',
@@ -121,6 +122,13 @@ export default class OPFS {
       const writable = await fileHandle.createWritable()
       await writable.write(buffer)
       await writable.close()
+    }
+    this._symlinksDirty = false
+  }
+
+  async _flushSymlinks() {
+    if (this._symlinksDirty) {
+      await this._saveSymlinks()
     }
   }
 
@@ -299,7 +307,8 @@ export default class OPFS {
     if (isSymlink) {
       const symlinks = await this._loadSymlinks()
       delete symlinks[path]
-      await this._saveSymlinks()
+      this._symlinksDirty = true
+      await this._flushSymlinks()
       return
     }
 
@@ -470,7 +479,8 @@ export default class OPFS {
       const target = symlinks[oldPath]
       delete symlinks[oldPath]
       symlinks[newPath] = target
-      await this._saveSymlinks()
+      this._symlinksDirty = true
+      await this._flushSymlinks()
       return
     }
 
@@ -541,7 +551,8 @@ export default class OPFS {
     }
 
     symlinks[path] = target
-    await this._saveSymlinks()
+    this._symlinksDirty = true
+    await this._flushSymlinks()
     this._clearDirCache(path)
   }
 
@@ -556,6 +567,36 @@ export default class OPFS {
     }
 
     return symlinks[path]
+  }
+
+  async symlinkBatch(links) {
+    const symlinks = await this._loadSymlinks()
+
+    for (const { target, path } of links) {
+      const normalizedPath = this._normalize(path)
+      const normalizedTarget = this._normalize(target)
+
+      if (symlinks[normalizedPath]) {
+        const err = new Error(`EEXIST: File exists, ${normalizedPath}`)
+        err.code = 'EEXIST'
+        throw err
+      }
+
+      try {
+        await this.stat(normalizedPath)
+        const err = new Error(`EEXIST: File exists, ${normalizedPath}`)
+        err.code = 'EEXIST'
+        throw err
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err
+      }
+
+      symlinks[normalizedPath] = normalizedTarget
+      this._clearDirCache(normalizedPath)
+    }
+
+    this._symlinksDirty = true
+    await this._flushSymlinks()
   }
 
   async backFile(path) {
