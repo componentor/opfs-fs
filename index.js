@@ -52,7 +52,15 @@ export default class OPFS {
   }
 
   _normalize(path) {
-    if (typeof path !== 'string') throw new TypeError('Expected string path')
+    if (path === undefined || path === null) {
+      throw new TypeError('Path cannot be undefined or null')
+    }
+    if (typeof path !== 'string') {
+      throw new TypeError(`Expected string path, got ${typeof path}`)
+    }
+    if (path === '') {
+      return '/'
+    }
 
     const parts = path.split('/')
     const stack = []

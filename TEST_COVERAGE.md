@@ -2,13 +2,15 @@
 
 ## Overview
 
-**Total Tests: 88**
+**Total Tests: 113**
 **Pass Rate: 100%**
-**Test Files: 2**
+**Test Files: 4**
 
 ```
-✓ test/opfs.test.js      (53 tests)
-✓ test/symlink.test.js   (35 tests)
+✓ test/opfs.test.js            (53 tests)
+✓ test/symlink.test.js         (36 tests)
+✓ test/performance.test.js     (11 tests)
+✓ test/git-integration.test.js (13 tests)
 ```
 
 ## Test Breakdown by Category
@@ -81,9 +83,9 @@
 - ✅ Handle concurrent operations
 - ✅ Maintain and clear directory cache correctly
 
-### Symlink Operations (35 tests)
+### Symlink Operations (36 tests)
 
-#### Basic Symlink Creation (6 tests)
+#### Basic Symlink Creation (7 tests)
 - ✅ Create a symlink
 - ✅ Read symlink target
 - ✅ Error: EEXIST if path exists as file
@@ -133,19 +135,72 @@
 - ✅ Read directory through symlink
 - ✅ lstat identifies directory symlink as symlink
 
-#### Edge Cases (5 tests)
+#### Edge Cases (6 tests)
 - ✅ Handle multiple symlinks in same directory
 - ✅ Handle symlinks across directories
 - ✅ Persist symlinks across instance creation
 - ✅ Handle symlink with relative-like path components
+- ✅ Create multiple symlinks efficiently with symlinkBatch
+
+### Performance Tests (11 tests)
+
+#### Read/Write Performance (5 tests)
+- ✅ Write 100 small files efficiently
+- ✅ Read 100 small files efficiently
+- ✅ Handle large files (1MB)
+- ✅ Handle 50 concurrent writes
+- ✅ Handle 50 concurrent reads
+
+#### Directory Operations Performance (2 tests)
+- ✅ Create nested directories efficiently
+- ✅ List large directories (200 files)
+
+#### Symlink Performance (2 tests)
+- ✅ Resolve symlink chains efficiently
+- ✅ Handle many symlinks (100+)
+
+#### Cache Performance (1 test)
+- ✅ Benefit from directory cache
+
+#### Sync vs Async Mode (1 test)
+- ✅ Compare sync and async performance
+
+### Git Integration Tests (13 tests)
+
+#### Basic Git Operations (3 tests)
+- ✅ Initialize a git repository
+- ✅ Create commits
+- ✅ Read git status
+
+#### Symlink Handling in Git (2 tests)
+- ✅ Create and commit a symlink
+- ✅ Handle symlink in readTree
+
+#### Simulate Clone-like Operations (2 tests)
+- ✅ Handle creating many files and symlinks like a clone operation
+- ✅ Handle symlinks in subdirectories during checkout-like operations
+
+#### Git Checkout with Symlinks (1 test)
+- ✅ Persist symlinks after commit
+
+#### Edge Cases with Git and Symlinks (3 tests)
+- ✅ Handle symlink chain in git repo
+- ✅ Handle broken symlink in git repo
+- ✅ Handle directory with symlinks in git operations
+
+#### Performance with Git Operations (2 tests)
+- ✅ Handle multiple file operations efficiently (50 files)
+- ✅ Handle multiple symlinks efficiently (20 symlinks with batch)
 
 ## Test Files Structure
 
 ```
 test/
-├── setup.js              # Mock OPFS environment
-├── opfs.test.js         # Core functionality tests (53)
-└── symlink.test.js      # Symlink feature tests (35)
+├── setup.js                 # Mock OPFS environment
+├── opfs.test.js            # Core functionality tests (53)
+├── symlink.test.js         # Symlink feature tests (36)
+├── performance.test.js     # Performance benchmarks (11)
+└── git-integration.test.js # Git compatibility tests (13)
 ```
 
 ## Mock Implementation
@@ -175,6 +230,7 @@ npm test -- --reporter=verbose
 - **DOM Environment**: happy-dom 20.0.10
 - **Node.js**: Compatible with ES modules
 - **Browser APIs**: Fully mocked OPFS implementation
+- **Git Integration**: isomorphic-git (for git compatibility tests)
 
 ## Coverage Areas
 
@@ -203,6 +259,24 @@ npm test -- --reporter=verbose
 - Circular link detection
 - Directory symlinks
 - Persistence
+- Batch operations
+
+### ✅ Performance Testing
+- Small file operations
+- Large file operations
+- Concurrent operations
+- Directory operations
+- Symlink performance
+- Cache effectiveness
+- Sync vs async modes
+
+### ✅ Git Integration
+- Repository initialization
+- Committing files and symlinks
+- Git status operations
+- Reading git trees
+- Handling symlinks in git operations
+- Performance with git workflows
 
 ## Continuous Integration
 
@@ -214,8 +288,9 @@ All tests run automatically on:
 ## Future Test Additions
 
 Potential areas for expanded testing:
-- [ ] Performance benchmarks
 - [ ] Memory usage tests
-- [ ] Stress tests with many files
-- [ ] Real browser integration tests
+- [ ] Stress tests with thousands of files
+- [ ] Real browser integration tests (E2E with Playwright/Puppeteer)
 - [ ] Cross-browser compatibility tests
+- [ ] Git operations with large repositories
+- [ ] Actual network-based clone tests with real repositories
