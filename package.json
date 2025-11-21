@@ -11,7 +11,8 @@
   "author": "Componentor",
   "license": "MIT",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "opfs",
@@ -24,5 +25,9 @@
   "bugs": {
     "url": "https://github.com/componentor/opfs-fs/issues"
   },
-  "homepage": "https://github.com/componentor/opfs-fs#readme"
+  "homepage": "https://github.com/componentor/opfs-fs#readme",
+  "devDependencies": {
+    "happy-dom": "^20.0.10",
+    "vitest": "^4.0.12"
+  }
 }

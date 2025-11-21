@@ -314,6 +314,7 @@ export default class OPFS {
 
   async readdir(path, options = {}) {
     path = this._normalize(path)
+    path = await this._resolveSymlink(path)
     const parts = path.split('/').filter(Boolean)
     let dir = await this.rootPromise
 
