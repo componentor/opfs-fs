@@ -228,4 +228,61 @@ describe('Performance Benchmarks', () => {
       expect(asyncDuration).toBeLessThan(1000)
     })
   })
+
+  describe('Filesystem Info Performance', () => {
+    it('should call statfs efficiently', async () => {
+      const start = performance.now()
+
+      for (let i = 0; i < 100; i++) {
+        await fs.statfs()
+      }
+
+      const duration = performance.now() - start
+      console.log(`100 statfs calls: ${duration.toFixed(2)}ms (${(duration/100).toFixed(2)}ms per call)`)
+
+      // statfs should be very fast - just a single Storage API call
+      expect(duration).toBeLessThan(500)
+    })
+
+    it('should call statfs with path verification efficiently', async () => {
+      await fs.mkdir('/testdir')
+      await fs.writeFile('/testdir/file.txt', 'content')
+
+      const start = performance.now()
+
+      for (let i = 0; i < 100; i++) {
+        await fs.statfs('/testdir/file.txt')
+      }
+
+      const duration = performance.now() - start
+      console.log(`100 statfs calls with path: ${duration.toFixed(2)}ms (${(duration/100).toFixed(2)}ms per call)`)
+
+      // With path verification adds a stat() call but should still be fast
+      expect(duration).toBeLessThan(1000)
+    })
+
+    it('should compare statfs vs du performance', async () => {
+      await fs.writeFile('/file.txt', 'content')
+
+      // statfs - single Storage API call
+      const statfsStart = performance.now()
+      for (let i = 0; i < 50; i++) {
+        await fs.statfs()
+      }
+      const statfsDuration = performance.now() - statfsStart
+
+      // du - needs to stat the file
+      const duStart = performance.now()
+      for (let i = 0; i < 50; i++) {
+        await fs.du('/file.txt')
+      }
+      const duDuration = performance.now() - duStart
+
+      console.log(`50 statfs: ${statfsDuration.toFixed(2)}ms`)
+      console.log(`50 du: ${duDuration.toFixed(2)}ms`)
+
+      expect(statfsDuration).toBeLessThan(500)
+      expect(duDuration).toBeLessThan(500)
+    })
+  })
 })

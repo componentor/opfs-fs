@@ -11,6 +11,7 @@ const MAX_SYMLINK_DEPTH = 10
  */
 export class SymlinkManager {
   private cache: SymlinkCache | null = null
+  private cacheCount = 0 // Track count to avoid Object.keys() calls
   private dirty = false
   private handleManager: HandleManager
   private useSync: boolean
@@ -30,14 +31,17 @@ export class SymlinkManager {
       const { fileHandle } = await this.handleManager.getHandle(SYMLINK_FILE)
       if (!fileHandle) {
         this.cache = {}
+        this.cacheCount = 0
         return this.cache
       }
 
       const file = await fileHandle.getFile()
       const text = await file.text()
       this.cache = JSON.parse(text)
+      this.cacheCount = Object.keys(this.cache).length
     } catch {
       this.cache = {}
+      this.cacheCount = 0
     }
 
     return this.cache
@@ -49,7 +53,8 @@ export class SymlinkManager {
   async save(): Promise<void> {
     if (!this.cache) return
 
-    const data = JSON.stringify(this.cache, null, 2)
+    // Use compact JSON (no formatting) for better performance
+    const data = JSON.stringify(this.cache)
     const { fileHandle } = await this.handleManager.getHandle(SYMLINK_FILE, { create: true })
 
     if (!fileHandle) return
@@ -84,9 +89,30 @@ export class SymlinkManager {
 
   /**
    * Resolve a path through symlinks
+   * Fast synchronous path when cache is already loaded
    */
   async resolve(path: string, maxDepth = MAX_SYMLINK_DEPTH): Promise<string> {
+    // Fast path: if cache is loaded and empty, return path directly (O(1) check)
+    if (this.cache !== null) {
+      // Skip resolution entirely if no symlinks exist (common case)
+      if (this.cacheCount === 0) {
+        return path
+      }
+      return this.resolveSync(path, this.cache, maxDepth)
+    }
+
     const symlinks = await this.load()
+    // Skip resolution entirely if no symlinks exist (common case)
+    if (this.cacheCount === 0) {
+      return path
+    }
+    return this.resolveSync(path, symlinks, maxDepth)
+  }
+
+  /**
+   * Synchronous resolution helper
+   */
+  private resolveSync(path: string, symlinks: SymlinkCache, maxDepth: number): string {
     let currentPath = path
     let depth = 0
 
@@ -140,6 +166,7 @@ export class SymlinkManager {
     await checkExists()
 
     symlinks[normalizedPath] = normalizedTarget
+    this.cacheCount++
     this.dirty = true
     await this.flush()
   }
@@ -166,6 +193,7 @@ export class SymlinkManager {
       symlinks[normalizedPath] = normalizedTarget
     }
 
+    this.cacheCount += links.length
     this.dirty = true
     await this.flush()
   }
@@ -178,6 +206,7 @@ export class SymlinkManager {
 
     if (symlinks[path]) {
       delete symlinks[path]
+      this.cacheCount--
       this.dirty = true
       await this.flush()
       return true

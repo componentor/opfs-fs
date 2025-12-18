@@ -20,6 +20,7 @@ export function createReadStream(
   const { start = 0, end = Infinity, highWaterMark = 64 * 1024 } = options
   let position = start
   let closed = false
+  let cachedData: Uint8Array | null = null
 
   return new ReadableStream({
     async pull(controller) {
@@ -29,13 +30,18 @@ export function createReadStream(
       }
 
       try {
-        const data = await context.readFile(path)
-        const endPos = Math.min(end, data.length)
-        const chunk = data.subarray(position, Math.min(position + highWaterMark, endPos))
+        // Cache file data on first read - avoid re-reading on every pull
+        if (cachedData === null) {
+          cachedData = await context.readFile(path)
+        }
+
+        const endPos = Math.min(end, cachedData.length)
+        const chunk = cachedData.subarray(position, Math.min(position + highWaterMark, endPos))
 
         if (chunk.length === 0 || position >= endPos) {
           controller.close()
           closed = true
+          cachedData = null // Release memory
           return
         }
 
@@ -47,6 +53,7 @@ export function createReadStream(
     },
     cancel() {
       closed = true
+      cachedData = null // Release memory
     }
   })
 }

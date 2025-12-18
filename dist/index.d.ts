@@ -260,6 +260,13 @@ declare class OPFS {
     private log;
     private logError;
     /**
+     * Execute tasks with limited concurrency to avoid overwhelming the system
+     * @param items - Array of items to process
+     * @param maxConcurrent - Maximum number of concurrent operations (default: 10)
+     * @param taskFn - Function to execute for each item
+     */
+    private limitConcurrency;
+    /**
      * Read file contents
      */
     readFile(path: string, options?: ReadFileOptions): Promise<string | Uint8Array>;

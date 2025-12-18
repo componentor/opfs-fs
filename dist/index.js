@@ -140,7 +140,12 @@ var HandleManager = class {
    * Clear directory cache for a path and its children
    */
   clearCache(path = "") {
+    if (this.dirCache.size === 0) return;
     const normalizedPath = normalize(path);
+    if (normalizedPath === "/" || normalizedPath === "") {
+      this.dirCache.clear();
+      return;
+    }
     for (const key of this.dirCache.keys()) {
       if (key === normalizedPath || key.startsWith(normalizedPath + "/")) {
         this.dirCache.delete(key);
@@ -154,11 +159,17 @@ var HandleManager = class {
     const cleanPath = path.replace(/^\/+/, "");
     const parts = cleanPath.split("/").filter(Boolean);
     let dir = await this.rootPromise;
+    let currentPath = "";
     for (let i = 0; i < parts.length - 1; i++) {
+      currentPath += "/" + parts[i];
+      if (this.dirCache.has(currentPath)) {
+        dir = this.dirCache.get(currentPath);
+        continue;
+      }
       try {
         dir = await dir.getDirectoryHandle(parts[i], { create: opts.create });
+        this.dirCache.set(currentPath, dir);
       } catch {
-        if (!opts.create) throw createENOENT(path);
         throw createENOENT(path);
       }
     }
@@ -211,8 +222,15 @@ var HandleManager = class {
     if (parentPath === "/" || parentPath === "") return;
     const parts = segments(parentPath);
     let dir = await this.rootPromise;
+    let currentPath = "";
     for (const part of parts) {
+      currentPath += "/" + part;
+      if (this.dirCache.has(currentPath)) {
+        dir = this.dirCache.get(currentPath);
+        continue;
+      }
       dir = await dir.getDirectoryHandle(part, { create: true });
+      this.dirCache.set(currentPath, dir);
     }
   }
   /**
@@ -241,6 +259,8 @@ var SYMLINK_FILE = "/.opfs-symlinks.json";
 var MAX_SYMLINK_DEPTH = 10;
 var SymlinkManager = class {
   cache = null;
+  cacheCount = 0;
+  // Track count to avoid Object.keys() calls
   dirty = false;
   handleManager;
   useSync;
@@ -257,13 +277,16 @@ var SymlinkManager = class {
       const { fileHandle } = await this.handleManager.getHandle(SYMLINK_FILE);
       if (!fileHandle) {
         this.cache = {};
+        this.cacheCount = 0;
         return this.cache;
       }
       const file = await fileHandle.getFile();
       const text = await file.text();
       this.cache = JSON.parse(text);
+      this.cacheCount = Object.keys(this.cache).length;
     } catch {
       this.cache = {};
+      this.cacheCount = 0;
     }
     return this.cache;
   }
@@ -272,7 +295,7 @@ var SymlinkManager = class {
    */
   async save() {
     if (!this.cache) return;
-    const data = JSON.stringify(this.cache, null, 2);
+    const data = JSON.stringify(this.cache);
     const { fileHandle } = await this.handleManager.getHandle(SYMLINK_FILE, { create: true });
     if (!fileHandle) return;
     const buffer = new TextEncoder().encode(data);
@@ -301,9 +324,25 @@ var SymlinkManager = class {
   }
   /**
    * Resolve a path through symlinks
+   * Fast synchronous path when cache is already loaded
    */
   async resolve(path, maxDepth = MAX_SYMLINK_DEPTH) {
+    if (this.cache !== null) {
+      if (this.cacheCount === 0) {
+        return path;
+      }
+      return this.resolveSync(path, this.cache, maxDepth);
+    }
     const symlinks = await this.load();
+    if (this.cacheCount === 0) {
+      return path;
+    }
+    return this.resolveSync(path, symlinks, maxDepth);
+  }
+  /**
+   * Synchronous resolution helper
+   */
+  resolveSync(path, symlinks, maxDepth) {
     let currentPath = path;
     let depth = 0;
     while (symlinks[currentPath] && depth < maxDepth) {
@@ -345,6 +384,7 @@ var SymlinkManager = class {
     }
     await checkExists();
     symlinks[normalizedPath] = normalizedTarget;
+    this.cacheCount++;
     this.dirty = true;
     await this.flush();
   }
@@ -362,6 +402,7 @@ var SymlinkManager = class {
       await checkExists(normalizedPath);
       symlinks[normalizedPath] = normalizedTarget;
     }
+    this.cacheCount += links.length;
     this.dirty = true;
     await this.flush();
   }
@@ -372,6 +413,7 @@ var SymlinkManager = class {
     const symlinks = await this.load();
     if (symlinks[path]) {
       delete symlinks[path];
+      this.cacheCount--;
       this.dirty = true;
       await this.flush();
       return true;
@@ -477,6 +519,7 @@ function createReadStream(path, options, context) {
   const { start = 0, end = Infinity, highWaterMark = 64 * 1024 } = options;
   let position = start;
   let closed = false;
+  let cachedData = null;
   return new ReadableStream({
     async pull(controller) {
       if (closed) {
@@ -484,12 +527,15 @@ function createReadStream(path, options, context) {
         return;
       }
       try {
-        const data = await context.readFile(path);
-        const endPos = Math.min(end, data.length);
-        const chunk = data.subarray(position, Math.min(position + highWaterMark, endPos));
+        if (cachedData === null) {
+          cachedData = await context.readFile(path);
+        }
+        const endPos = Math.min(end, cachedData.length);
+        const chunk = cachedData.subarray(position, Math.min(position + highWaterMark, endPos));
         if (chunk.length === 0 || position >= endPos) {
           controller.close();
           closed = true;
+          cachedData = null;
           return;
         }
         position += chunk.length;
@@ -500,6 +546,7 @@ function createReadStream(path, options, context) {
     },
     cancel() {
       closed = true;
+      cachedData = null;
     }
   });
 }
@@ -565,6 +612,29 @@ var OPFS = class {
     }
   }
   /**
+   * Execute tasks with limited concurrency to avoid overwhelming the system
+   * @param items - Array of items to process
+   * @param maxConcurrent - Maximum number of concurrent operations (default: 10)
+   * @param taskFn - Function to execute for each item
+   */
+  async limitConcurrency(items, maxConcurrent, taskFn) {
+    if (items.length === 0) return;
+    if (items.length <= 3) {
+      for (const item of items) {
+        await taskFn(item);
+      }
+      return;
+    }
+    const queue = [...items];
+    const workers = Array.from({ length: Math.min(maxConcurrent, items.length) }).map(async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        if (item !== void 0) await taskFn(item);
+      }
+    });
+    await Promise.all(workers);
+  }
+  /**
    * Read file contents
    */
   async readFile(path, options = {}) {
@@ -601,7 +671,6 @@ var OPFS = class {
     try {
       const normalizedPath = normalize(path);
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
-      this.handleManager.clearCache(resolvedPath);
       const { fileHandle } = await this.handleManager.getHandle(resolvedPath, { create: true });
       const buffer = typeof data === "string" ? new TextEncoder().encode(data) : data;
       if (this.useSync) {
@@ -642,23 +711,13 @@ var OPFS = class {
     try {
       const normalizedPath = normalize(path);
       this.handleManager.clearCache(normalizedPath);
-      const limitConcurrency = async (items, maxConcurrent, taskFn) => {
-        const queue = [...items];
-        const workers = Array.from({ length: maxConcurrent }).map(async () => {
-          while (queue.length) {
-            const item = queue.shift();
-            if (item !== void 0) await taskFn(item);
-          }
-        });
-        await Promise.all(workers);
-      };
       if (isRoot(normalizedPath)) {
         const root = await this.handleManager.getRoot();
         const entries = [];
         for await (const [name2] of root.entries()) {
           entries.push(name2);
         }
-        await limitConcurrency(
+        await this.limitConcurrency(
           entries,
           10,
           (name2) => root.removeEntry(name2, { recursive: true })
@@ -715,12 +774,17 @@ var OPFS = class {
       const normalizedPath = normalize(path);
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
       const dir = await this.handleManager.getDirectoryHandle(resolvedPath);
+      const withFileTypes = options?.withFileTypes === true;
+      const symlinksInDir = await this.symlinkManager.getSymlinksInDir(resolvedPath);
+      const hasSymlinks = symlinksInDir.length > 0;
+      const symlinkSet = hasSymlinks ? new Set(symlinksInDir) : null;
+      const entryNames = /* @__PURE__ */ new Set();
       const entries = [];
       for await (const [name, handle] of dir.entries()) {
         if (this.symlinkManager.isMetadataFile(name)) continue;
-        const entryPath = resolvedPath === "/" ? `/${name}` : `${resolvedPath}/${name}`;
-        const isSymlink = await this.symlinkManager.isSymlink(entryPath);
-        if (options?.withFileTypes) {
+        entryNames.add(name);
+        if (withFileTypes) {
+          const isSymlink = hasSymlinks && symlinkSet.has(name);
           entries.push({
             name,
             isFile: () => !isSymlink && handle.kind === "file",
@@ -731,21 +795,19 @@ var OPFS = class {
           entries.push(name);
         }
       }
-      const symlinksInDir = await this.symlinkManager.getSymlinksInDir(resolvedPath);
-      for (const name of symlinksInDir) {
-        const exists = entries.some(
-          (e) => typeof e === "string" ? e === name : e.name === name
-        );
-        if (!exists) {
-          if (options?.withFileTypes) {
-            entries.push({
-              name,
-              isFile: () => false,
-              isDirectory: () => false,
-              isSymbolicLink: () => true
-            });
-          } else {
-            entries.push(name);
+      if (hasSymlinks) {
+        for (const name of symlinksInDir) {
+          if (!entryNames.has(name)) {
+            if (withFileTypes) {
+              entries.push({
+                name,
+                isFile: () => false,
+                isDirectory: () => false,
+                isSymbolicLink: () => true
+              });
+            } else {
+              entries.push(name);
+            }
           }
         }
       }
@@ -880,9 +942,11 @@ var OPFS = class {
       } else if (stat.isDirectory()) {
         await this.mkdir(normalizedNew);
         const entries = await this.readdir(normalizedOld);
-        for (const entry of entries) {
-          await this.rename(`${normalizedOld}/${entry}`, `${normalizedNew}/${entry}`);
-        }
+        await this.limitConcurrency(
+          entries,
+          10,
+          (entry) => this.rename(`${normalizedOld}/${entry}`, `${normalizedNew}/${entry}`)
+        );
         await this.rmdir(normalizedOld);
       }
     } catch (err) {
@@ -1036,9 +1100,11 @@ var OPFS = class {
           await this.mkdir(normalizedDest);
         }
         const entries = await this.readdir(normalizedSrc);
-        for (const entry of entries) {
-          await this.cp(`${normalizedSrc}/${entry}`, `${normalizedDest}/${entry}`, options);
-        }
+        await this.limitConcurrency(
+          entries,
+          10,
+          (entry) => this.cp(`${normalizedSrc}/${entry}`, `${normalizedDest}/${entry}`, options)
+        );
       } else {
         if (errorOnExist) {
           try {
@@ -1126,8 +1192,8 @@ var OPFS = class {
         const data = new Uint8Array(await file.arrayBuffer());
         const finalData = new Uint8Array(len);
         const copyLen = Math.min(len, data.length);
-        for (let i = 0; i < copyLen; i++) {
-          finalData[i] = data[i];
+        if (copyLen > 0) {
+          finalData.set(data.subarray(0, copyLen), 0);
         }
         const writable = await fileHandle.createWritable();
         await writable.write(finalData);

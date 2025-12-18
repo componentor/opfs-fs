@@ -35,7 +35,18 @@ export class HandleManager {
    * Clear directory cache for a path and its children
    */
   clearCache(path = ''): void {
+    // Early exit if cache is empty
+    if (this.dirCache.size === 0) return
+
     const normalizedPath = normalize(path)
+
+    // For root path, just clear everything
+    if (normalizedPath === '/' || normalizedPath === '') {
+      this.dirCache.clear()
+      return
+    }
+
+    // Only iterate if there might be something to delete
     for (const key of this.dirCache.keys()) {
       if (key === normalizedPath || key.startsWith(normalizedPath + '/')) {
         this.dirCache.delete(key)
@@ -50,13 +61,22 @@ export class HandleManager {
     const cleanPath = path.replace(/^\/+/, '')
     const parts = cleanPath.split('/').filter(Boolean)
     let dir = await this.rootPromise
+    let currentPath = ''
 
-    // Navigate to parent directory
+    // Navigate to parent directory using cache
     for (let i = 0; i < parts.length - 1; i++) {
+      currentPath += '/' + parts[i]
+
+      // Check cache first for better performance
+      if (this.dirCache.has(currentPath)) {
+        dir = this.dirCache.get(currentPath)!
+        continue
+      }
+
       try {
         dir = await dir.getDirectoryHandle(parts[i], { create: opts.create })
+        this.dirCache.set(currentPath, dir)
       } catch {
-        if (!opts.create) throw createENOENT(path)
         throw createENOENT(path)
       }
     }
@@ -122,9 +142,19 @@ export class HandleManager {
 
     const parts = segments(parentPath)
     let dir = await this.rootPromise
+    let currentPath = ''
 
     for (const part of parts) {
+      currentPath += '/' + part
+
+      // Check cache first for better performance
+      if (this.dirCache.has(currentPath)) {
+        dir = this.dirCache.get(currentPath)!
+        continue
+      }
+
       dir = await dir.getDirectoryHandle(part, { create: true })
+      this.dirCache.set(currentPath, dir)
     }
   }
 

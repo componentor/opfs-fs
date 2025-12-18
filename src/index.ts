@@ -66,6 +66,37 @@ export default class OPFS {
   }
 
   /**
+   * Execute tasks with limited concurrency to avoid overwhelming the system
+   * @param items - Array of items to process
+   * @param maxConcurrent - Maximum number of concurrent operations (default: 10)
+   * @param taskFn - Function to execute for each item
+   */
+  private async limitConcurrency<T>(
+    items: T[],
+    maxConcurrent: number,
+    taskFn: (item: T) => Promise<void>
+  ): Promise<void> {
+    if (items.length === 0) return
+
+    // For small batches, just run sequentially to avoid Promise overhead
+    if (items.length <= 3) {
+      for (const item of items) {
+        await taskFn(item)
+      }
+      return
+    }
+
+    const queue = [...items]
+    const workers = Array.from({ length: Math.min(maxConcurrent, items.length) }).map(async () => {
+      while (queue.length) {
+        const item = queue.shift()
+        if (item !== undefined) await taskFn(item)
+      }
+    })
+    await Promise.all(workers)
+  }
+
+  /**
    * Read file contents
    */
   async readFile(path: string, options: ReadFileOptions = {}): Promise<string | Uint8Array> {
@@ -109,7 +140,7 @@ export default class OPFS {
     try {
       const normalizedPath = normalize(path)
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
-      this.handleManager.clearCache(resolvedPath)
+      // Note: No clearCache needed here - cache only stores directory handles, not files
 
       const { fileHandle } = await this.handleManager.getHandle(resolvedPath, { create: true })
       const buffer = typeof data === 'string' ? new TextEncoder().encode(data) : data
@@ -155,28 +186,13 @@ export default class OPFS {
       const normalizedPath = normalize(path)
       this.handleManager.clearCache(normalizedPath)
 
-      const limitConcurrency = async <T>(
-        items: T[],
-        maxConcurrent: number,
-        taskFn: (item: T) => Promise<void>
-      ): Promise<void> => {
-        const queue = [...items]
-        const workers = Array.from({ length: maxConcurrent }).map(async () => {
-          while (queue.length) {
-            const item = queue.shift()
-            if (item !== undefined) await taskFn(item)
-          }
-        })
-        await Promise.all(workers)
-      }
-
       if (isRoot(normalizedPath)) {
         const root = await this.handleManager.getRoot()
         const entries: string[] = []
         for await (const [name] of root.entries()) {
           entries.push(name)
         }
-        await limitConcurrency(entries, 10, (name) =>
+        await this.limitConcurrency(entries, 10, (name) =>
           root.removeEntry(name, { recursive: true })
         )
         return
@@ -240,15 +256,25 @@ export default class OPFS {
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
 
       const dir = await this.handleManager.getDirectoryHandle(resolvedPath)
+      const withFileTypes = options?.withFileTypes === true
+
+      // Pre-fetch symlinks only once - skip if no symlinks exist (common case)
+      const symlinksInDir = await this.symlinkManager.getSymlinksInDir(resolvedPath)
+      const hasSymlinks = symlinksInDir.length > 0
+      const symlinkSet = hasSymlinks ? new Set(symlinksInDir) : null
+
+      // Collect entries from OPFS directory
+      const entryNames = new Set<string>()
       const entries: (string | Dirent)[] = []
 
       for await (const [name, handle] of dir.entries()) {
         if (this.symlinkManager.isMetadataFile(name)) continue
 
-        const entryPath = resolvedPath === '/' ? `/${name}` : `${resolvedPath}/${name}`
-        const isSymlink = await this.symlinkManager.isSymlink(entryPath)
+        entryNames.add(name)
 
-        if (options?.withFileTypes) {
+        if (withFileTypes) {
+          // Only check symlink if there are symlinks
+          const isSymlink = hasSymlinks && symlinkSet!.has(name)
           entries.push({
             name,
             isFile: () => !isSymlink && handle.kind === 'file',
@@ -260,22 +286,20 @@ export default class OPFS {
         }
       }
 
-      // Add symlinks that exist in the directory
-      const symlinksInDir = await this.symlinkManager.getSymlinksInDir(resolvedPath)
-      for (const name of symlinksInDir) {
-        const exists = entries.some(e =>
-          typeof e === 'string' ? e === name : e.name === name
-        )
-        if (!exists) {
-          if (options?.withFileTypes) {
-            entries.push({
-              name,
-              isFile: () => false,
-              isDirectory: () => false,
-              isSymbolicLink: () => true
-            })
-          } else {
-            entries.push(name)
+      // Add symlinks that don't have corresponding OPFS entries (only if there are symlinks)
+      if (hasSymlinks) {
+        for (const name of symlinksInDir) {
+          if (!entryNames.has(name)) {
+            if (withFileTypes) {
+              entries.push({
+                name,
+                isFile: () => false,
+                isDirectory: () => false,
+                isSymbolicLink: () => true
+              })
+            } else {
+              entries.push(name)
+            }
           }
         }
       }
@@ -429,9 +453,10 @@ export default class OPFS {
       } else if (stat.isDirectory()) {
         await this.mkdir(normalizedNew)
         const entries = await this.readdir(normalizedOld) as string[]
-        for (const entry of entries) {
-          await this.rename(`${normalizedOld}/${entry}`, `${normalizedNew}/${entry}`)
-        }
+        // Use concurrency limiter to avoid Promise overhead for small batches
+        await this.limitConcurrency(entries, 10, entry =>
+          this.rename(`${normalizedOld}/${entry}`, `${normalizedNew}/${entry}`)
+        )
         await this.rmdir(normalizedOld)
       }
     } catch (err) {
@@ -609,9 +634,10 @@ export default class OPFS {
         }
 
         const entries = await this.readdir(normalizedSrc) as string[]
-        for (const entry of entries) {
-          await this.cp(`${normalizedSrc}/${entry}`, `${normalizedDest}/${entry}`, options)
-        }
+        // Use concurrency limiter to avoid Promise overhead for small batches
+        await this.limitConcurrency(entries, 10, entry =>
+          this.cp(`${normalizedSrc}/${entry}`, `${normalizedDest}/${entry}`, options)
+        )
       } else {
         if (errorOnExist) {
           try {
@@ -708,10 +734,10 @@ export default class OPFS {
 
         // Create a new array with the truncated/padded size
         const finalData = new Uint8Array(len)
-        // Copy up to len bytes from original data
+        // Copy up to len bytes from original data using set() for performance
         const copyLen = Math.min(len, data.length)
-        for (let i = 0; i < copyLen; i++) {
-          finalData[i] = data[i]
+        if (copyLen > 0) {
+          finalData.set(data.subarray(0, copyLen), 0)
         }
         // Remaining bytes (if any) are already zero from Uint8Array initialization
 
