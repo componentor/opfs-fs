@@ -437,9 +437,8 @@
           }
         },
         async gc() {
-          // Clear and reinitialize LightningFS
-          await clearLightningFS();
-          await initLightning();
+          // Just clear files like OPFS does - don't reinitialize
+          await this.rmdir('/');
         }
       };
     }
@@ -487,10 +486,8 @@
     async function runCoreBenchmarks(fs, prefix, silent = false) {
       const results = {};
 
-      // Clear storage (skip for lightning since it's wiped on init)
-      if (prefix !== 'lightning') {
-        await clearOPFS(fs);
-      }
+      // Clear storage before each benchmark run
+      await clearOPFS(fs);
       if (silent) await yieldToMain();
 
       // Small file writes - yield every 25 operations to prevent freeze

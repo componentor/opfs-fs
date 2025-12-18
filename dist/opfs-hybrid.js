@@ -509,13 +509,17 @@ var SymlinkManager = class {
    */
   async symlinkBatch(links, checkExists) {
     const symlinks = await this.load();
-    for (const { target, path } of links) {
-      const normalizedPath = normalize(path);
-      const normalizedTarget = normalize(target);
+    const normalizedLinks = links.map(({ target, path }) => ({
+      normalizedPath: normalize(path),
+      normalizedTarget: normalize(target)
+    }));
+    for (const { normalizedPath } of normalizedLinks) {
       if (symlinks[normalizedPath]) {
         throw createEEXIST(normalizedPath);
       }
-      await checkExists(normalizedPath);
+    }
+    await Promise.all(normalizedLinks.map(({ normalizedPath }) => checkExists(normalizedPath)));
+    for (const { normalizedPath, normalizedTarget } of normalizedLinks) {
       symlinks[normalizedPath] = normalizedTarget;
     }
     this.cacheCount += links.length;
@@ -831,48 +835,57 @@ var OPFS = class {
     this.log("readFileBatch", `${paths.length} files`);
     if (paths.length === 0) return [];
     try {
+      const resolvedPaths = await Promise.all(
+        paths.map(async (path, index) => {
+          const normalizedPath = normalize(path);
+          const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
+          return { index, resolvedPath };
+        })
+      );
       const byParent = /* @__PURE__ */ new Map();
-      for (let i = 0; i < paths.length; i++) {
-        const normalizedPath = normalize(paths[i]);
-        const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
+      for (const { index, resolvedPath } of resolvedPaths) {
         const parentPath = dirname(resolvedPath);
         const name = basename(resolvedPath);
         if (!byParent.has(parentPath)) {
           byParent.set(parentPath, []);
         }
-        byParent.get(parentPath).push({ index: i, name, resolvedPath });
+        byParent.get(parentPath).push({ index, name, resolvedPath });
       }
       const results = new Array(paths.length);
-      for (const [parentPath, files] of byParent) {
-        let parentHandle;
-        try {
-          parentHandle = await this.handleManager.getDirectoryHandle(parentPath);
-        } catch {
-          for (const { index } of files) {
-            results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) };
-          }
-          continue;
-        }
-        for (const { index, name } of files) {
+      await Promise.all(
+        Array.from(byParent.entries()).map(async ([parentPath, files]) => {
+          let parentHandle;
           try {
-            const fileHandle = await parentHandle.getFileHandle(name);
-            let buffer;
-            if (this.useSync) {
-              const access = await fileHandle.createSyncAccessHandle();
-              const size = access.getSize();
-              buffer = new Uint8Array(size);
-              access.read(buffer);
-              access.close();
-            } else {
-              const file = await fileHandle.getFile();
-              buffer = new Uint8Array(await file.arrayBuffer());
+            parentHandle = await this.handleManager.getDirectoryHandle(parentPath);
+          } catch {
+            for (const { index } of files) {
+              results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) };
             }
-            results[index] = { path: paths[index], data: buffer };
-          } catch (err) {
-            results[index] = { path: paths[index], data: null, error: err };
+            return;
           }
-        }
-      }
+          await Promise.all(
+            files.map(async ({ index, name }) => {
+              try {
+                const fileHandle = await parentHandle.getFileHandle(name);
+                let buffer;
+                if (this.useSync) {
+                  const access = await fileHandle.createSyncAccessHandle();
+                  const size = access.getSize();
+                  buffer = new Uint8Array(size);
+                  access.read(buffer);
+                  access.close();
+                } else {
+                  const file = await fileHandle.getFile();
+                  buffer = new Uint8Array(await file.arrayBuffer());
+                }
+                results[index] = { path: paths[index], data: buffer };
+              } catch (err) {
+                results[index] = { path: paths[index], data: null, error: err };
+              }
+            })
+          );
+        })
+      );
       return results;
     } catch (err) {
       this.logError("readFileBatch", err);
@@ -919,35 +932,49 @@ var OPFS = class {
     if (entries.length === 0) return;
     try {
       const encoder = new TextEncoder();
+      const resolvedEntries = await Promise.all(
+        entries.map(async ({ path, data }) => {
+          const normalizedPath = normalize(path);
+          const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
+          return {
+            resolvedPath,
+            buffer: typeof data === "string" ? encoder.encode(data) : data
+          };
+        })
+      );
       const byParent = /* @__PURE__ */ new Map();
-      for (const { path, data } of entries) {
-        const normalizedPath = normalize(path);
-        const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
+      for (const { resolvedPath, buffer } of resolvedEntries) {
         const parentPath = dirname(resolvedPath);
         const name = basename(resolvedPath);
-        const buffer = typeof data === "string" ? encoder.encode(data) : data;
         if (!byParent.has(parentPath)) {
           byParent.set(parentPath, []);
         }
         byParent.get(parentPath).push({ name, buffer });
       }
-      for (const [parentPath, files] of byParent) {
-        await this.handleManager.mkdir(parentPath);
-        const parentHandle = await this.handleManager.getDirectoryHandle(parentPath);
-        for (const { name, buffer } of files) {
-          const fileHandle = await parentHandle.getFileHandle(name, { create: true });
-          if (this.useSync) {
-            const access = await fileHandle.createSyncAccessHandle();
-            access.truncate(0);
-            access.write(buffer, { at: 0 });
-            access.close();
-          } else {
-            const writable = await fileHandle.createWritable();
-            await writable.write(buffer);
-            await writable.close();
-          }
-        }
-      }
+      const parentPaths = Array.from(byParent.keys());
+      await Promise.all(parentPaths.map((parentPath) => this.handleManager.mkdir(parentPath)));
+      const parentHandles = await Promise.all(
+        parentPaths.map((parentPath) => this.handleManager.getDirectoryHandle(parentPath))
+      );
+      const handleMap = new Map(parentPaths.map((path, i) => [path, parentHandles[i]]));
+      await Promise.all(
+        Array.from(byParent.entries()).flatMap(([parentPath, files]) => {
+          const parentHandle = handleMap.get(parentPath);
+          return files.map(async ({ name, buffer }) => {
+            const fileHandle = await parentHandle.getFileHandle(name, { create: true });
+            if (this.useSync) {
+              const access = await fileHandle.createSyncAccessHandle();
+              access.truncate(0);
+              access.write(buffer, { at: 0 });
+              access.close();
+            } else {
+              const writable = await fileHandle.createWritable();
+              await writable.write(buffer);
+              await writable.close();
+            }
+          });
+        })
+      );
     } catch (err) {
       this.logError("writeFileBatch", err);
       throw wrapError(err);
@@ -1219,8 +1246,10 @@ var OPFS = class {
       if (renamed) return;
       const stat = await this.stat(normalizedOld);
       if (stat.isFile()) {
-        const data = await this.readFile(normalizedOld);
-        await this.handleManager.ensureParentDir(normalizedNew);
+        const [data] = await Promise.all([
+          this.readFile(normalizedOld),
+          this.handleManager.ensureParentDir(normalizedNew)
+        ]);
         await this.writeFile(normalizedNew, data);
         await this.unlink(normalizedOld);
       } else if (stat.isDirectory()) {
@@ -1367,8 +1396,10 @@ var OPFS = class {
           if (err.code !== "ENOENT") throw err;
         }
       }
-      const data = await this.readFile(resolvedSrc);
-      await this.handleManager.ensureParentDir(normalizedDest);
+      const [data] = await Promise.all([
+        this.readFile(resolvedSrc),
+        this.handleManager.ensureParentDir(normalizedDest)
+      ]);
       await this.writeFile(normalizedDest, data);
     } catch (err) {
       this.logError("copyFile", err);

@@ -214,60 +214,71 @@ export default class OPFS {
     if (paths.length === 0) return []
 
     try {
-      // Group paths by parent directory to optimize handle reuse
+      // Resolve all symlinks in parallel first (I/O bound)
+      const resolvedPaths = await Promise.all(
+        paths.map(async (path, index) => {
+          const normalizedPath = normalize(path)
+          const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
+          return { index, resolvedPath }
+        })
+      )
+
+      // Group by parent directory (now synchronous)
       const byParent = new Map<string, Array<{ index: number; name: string; resolvedPath: string }>>()
 
-      for (let i = 0; i < paths.length; i++) {
-        const normalizedPath = normalize(paths[i])
-        const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
+      for (const { index, resolvedPath } of resolvedPaths) {
         const parentPath = dirname(resolvedPath)
         const name = basename(resolvedPath)
 
         if (!byParent.has(parentPath)) {
           byParent.set(parentPath, [])
         }
-        byParent.get(parentPath)!.push({ index: i, name, resolvedPath })
+        byParent.get(parentPath)!.push({ index, name, resolvedPath })
       }
 
       // Pre-allocate results array
       const results: BatchReadResult[] = new Array(paths.length)
 
-      // Process each directory group
-      for (const [parentPath, files] of byParent) {
-        let parentHandle: FileSystemDirectoryHandle
-        try {
-          parentHandle = await this.handleManager.getDirectoryHandle(parentPath)
-        } catch {
-          // Parent doesn't exist - mark all files in this group as not found
-          for (const { index } of files) {
-            results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) }
-          }
-          continue
-        }
-
-        // Read all files in this directory
-        for (const { index, name } of files) {
+      // Process all directory groups in parallel
+      await Promise.all(
+        Array.from(byParent.entries()).map(async ([parentPath, files]) => {
+          let parentHandle: FileSystemDirectoryHandle
           try {
-            const fileHandle = await parentHandle.getFileHandle(name)
-            let buffer: Uint8Array
-
-            if (this.useSync) {
-              const access = await fileHandle.createSyncAccessHandle()
-              const size = access.getSize()
-              buffer = new Uint8Array(size)
-              access.read(buffer)
-              access.close()
-            } else {
-              const file = await fileHandle.getFile()
-              buffer = new Uint8Array(await file.arrayBuffer())
+            parentHandle = await this.handleManager.getDirectoryHandle(parentPath)
+          } catch {
+            // Parent doesn't exist - mark all files in this group as not found
+            for (const { index } of files) {
+              results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) }
             }
-
-            results[index] = { path: paths[index], data: buffer }
-          } catch (err) {
-            results[index] = { path: paths[index], data: null, error: err as Error }
+            return
           }
-        }
-      }
+
+          // Read all files in this directory in parallel
+          await Promise.all(
+            files.map(async ({ index, name }) => {
+              try {
+                const fileHandle = await parentHandle.getFileHandle(name)
+                let buffer: Uint8Array
+
+                if (this.useSync) {
+                  const access = await fileHandle.createSyncAccessHandle()
+                  const size = access.getSize()
+                  buffer = new Uint8Array(size)
+                  access.read(buffer)
+                  access.close()
+                } else {
+                  const file = await fileHandle.getFile()
+                  buffer = new Uint8Array(await file.arrayBuffer())
+                }
+
+                results[index] = { path: paths[index], data: buffer }
+              } catch (err) {
+                results[index] = { path: paths[index], data: null, error: err as Error }
+              }
+            })
+          )
+        })
+      )
 
       return results
     } catch (err) {
@@ -324,15 +335,24 @@ export default class OPFS {
       // Reuse encoder for all string conversions
       const encoder = new TextEncoder()
 
-      // Group entries by parent directory to optimize handle reuse
+      // Resolve all symlinks and convert data in parallel (I/O bound)
+      const resolvedEntries = await Promise.all(
+        entries.map(async ({ path, data }) => {
+          const normalizedPath = normalize(path)
+          const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
+          return {
+            resolvedPath,
+            buffer: typeof data === 'string' ? encoder.encode(data) : data
+          }
+        })
+      )
+
+      // Group entries by parent directory (now synchronous)
       const byParent = new Map<string, Array<{ name: string; buffer: Uint8Array }>>()
 
-      for (const { path, data } of entries) {
-        const normalizedPath = normalize(path)
-        const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
+      for (const { resolvedPath, buffer } of resolvedEntries) {
         const parentPath = dirname(resolvedPath)
         const name = basename(resolvedPath)
-        const buffer = typeof data === 'string' ? encoder.encode(data) : data
 
         if (!byParent.has(parentPath)) {
           byParent.set(parentPath, [])
@@ -340,28 +360,34 @@ export default class OPFS {
         byParent.get(parentPath)!.push({ name, buffer })
       }
 
-      // Process each directory group sequentially (avoids concurrency overhead)
-      for (const [parentPath, files] of byParent) {
-        // Ensure parent directory exists once for the group
-        await this.handleManager.mkdir(parentPath)
-        const parentHandle = await this.handleManager.getDirectoryHandle(parentPath)
+      // Pre-create all directories and get handles in parallel
+      const parentPaths = Array.from(byParent.keys())
+      await Promise.all(parentPaths.map((parentPath) => this.handleManager.mkdir(parentPath)))
+      const parentHandles = await Promise.all(
+        parentPaths.map((parentPath) => this.handleManager.getDirectoryHandle(parentPath))
+      )
+      const handleMap = new Map(parentPaths.map((path, i) => [path, parentHandles[i]]))
 
-        // Write all files in this directory
-        for (const { name, buffer } of files) {
-          const fileHandle = await parentHandle.getFileHandle(name, { create: true })
+      // Write all files across all directories in a single parallel batch
+      await Promise.all(
+        Array.from(byParent.entries()).flatMap(([parentPath, files]) => {
+          const parentHandle = handleMap.get(parentPath)!
+          return files.map(async ({ name, buffer }) => {
+            const fileHandle = await parentHandle.getFileHandle(name, { create: true })
 
-          if (this.useSync) {
-            const access = await fileHandle.createSyncAccessHandle()
-            access.truncate(0)
-            access.write(buffer, { at: 0 })
-            access.close()
-          } else {
-            const writable = await fileHandle.createWritable()
-            await writable.write(buffer)
-            await writable.close()
-          }
-        }
-      }
+            if (this.useSync) {
+              const access = await fileHandle.createSyncAccessHandle()
+              access.truncate(0)
+              access.write(buffer, { at: 0 })
+              access.close()
+            } else {
+              const writable = await fileHandle.createWritable()
+              await writable.write(buffer)
+              await writable.close()
+            }
+          })
+        })
+      )
     } catch (err) {
       this.logError('writeFileBatch', err)
       throw wrapError(err)
@@ -681,8 +707,11 @@ export default class OPFS {
       const stat = await this.stat(normalizedOld)
 
       if (stat.isFile()) {
-        const data = await this.readFile(normalizedOld)
-        await this.handleManager.ensureParentDir(normalizedNew)
+        // Run readFile and ensureParentDir in parallel (no dependency)
+        const [data] = await Promise.all([
+          this.readFile(normalizedOld),
+          this.handleManager.ensureParentDir(normalizedNew)
+        ])
         await this.writeFile(normalizedNew, data as Uint8Array)
         await this.unlink(normalizedOld)
       } else if (stat.isDirectory()) {
@@ -856,8 +885,11 @@ export default class OPFS {
         }
       }
 
-      const data = await this.readFile(resolvedSrc)
-      await this.handleManager.ensureParentDir(normalizedDest)
+      // Run readFile and ensureParentDir in parallel (no dependency)
+      const [data] = await Promise.all([
+        this.readFile(resolvedSrc),
+        this.handleManager.ensureParentDir(normalizedDest)
+      ])
       await this.writeFile(normalizedDest, data as Uint8Array)
     } catch (err) {
       this.logError('copyFile', err)

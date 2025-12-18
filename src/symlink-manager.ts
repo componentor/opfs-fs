@@ -237,16 +237,24 @@ export class SymlinkManager {
   ): Promise<void> {
     const symlinks = await this.load()
 
-    for (const { target, path } of links) {
-      const normalizedPath = normalize(path)
-      const normalizedTarget = normalize(target)
+    // Prepare all normalized paths first
+    const normalizedLinks = links.map(({ target, path }) => ({
+      normalizedPath: normalize(path),
+      normalizedTarget: normalize(target)
+    }))
 
+    // Check for existing symlinks in memory (fast)
+    for (const { normalizedPath } of normalizedLinks) {
       if (symlinks[normalizedPath]) {
         throw createEEXIST(normalizedPath)
       }
+    }
 
-      await checkExists(normalizedPath)
+    // Check filesystem existence in parallel (I/O bound)
+    await Promise.all(normalizedLinks.map(({ normalizedPath }) => checkExists(normalizedPath)))
 
+    // Add all symlinks at once
+    for (const { normalizedPath, normalizedTarget } of normalizedLinks) {
       symlinks[normalizedPath] = normalizedTarget
     }
 
