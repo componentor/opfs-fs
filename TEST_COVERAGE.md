@@ -2,16 +2,16 @@
 
 ## Overview
 
-**Total Tests: 188**
+**Total Tests: 199**
 **Pass Rate: 100%**
 **Test Files: 5**
 
 ```
-✓ test/opfs.test.js            (53 tests)
-✓ test/symlink.test.js         (36 tests)
-✓ test/performance.test.js     (11 tests)
-✓ test/git-integration.test.js (25 tests)
-✓ test/fs-compat.test.js       (63 tests)
+✓ test/opfs.test.ts            (53 tests)
+✓ test/symlink.test.ts         (36 tests)
+✓ test/performance.test.ts     (16 tests)
+✓ test/git-integration.test.ts (25 tests)
+✓ test/fs-compat.test.ts       (69 tests)
 ```
 
 ## Test Breakdown by Category
@@ -143,14 +143,16 @@
 - ✅ Handle symlink with relative-like path components
 - ✅ Create multiple symlinks efficiently with symlinkBatch
 
-### Performance Tests (11 tests)
+### Performance Tests (16 tests)
 
-#### Read/Write Performance (5 tests)
+#### Read/Write Performance (8 tests)
 - ✅ Write 100 small files efficiently
 - ✅ Read 100 small files efficiently
 - ✅ Handle large files (1MB)
 - ✅ Handle 50 concurrent writes
 - ✅ Handle 50 concurrent reads
+- ✅ Handle batch writes efficiently (100 files)
+- ✅ Handle batch reads efficiently (100 files)
 
 #### Directory Operations Performance (2 tests)
 - ✅ Create nested directories efficiently
@@ -165,6 +167,11 @@
 
 #### Sync vs Async Mode (1 test)
 - ✅ Compare sync and async performance
+
+#### Filesystem Info Performance (3 tests)
+- ✅ Call statfs efficiently
+- ✅ Call statfs with path verification
+- ✅ Compare statfs vs du performance
 
 ### Git Integration Tests (25 tests)
 
@@ -314,12 +321,12 @@
 
 ```
 test/
-├── setup.js                 # Mock OPFS environment
-├── opfs.test.js            # Core functionality tests (53)
-├── symlink.test.js         # Symlink feature tests (36)
-├── performance.test.js     # Performance benchmarks (11)
-├── git-integration.test.js # Git compatibility tests (25)
-└── fs-compat.test.js       # Node.js fs compatibility tests (63)
+├── setup.ts                  # Mock OPFS environment
+├── opfs.test.ts              # Core functionality tests (53)
+├── symlink.test.ts           # Symlink feature tests (36)
+├── performance.test.ts       # Performance benchmarks (16)
+├── git-integration.test.ts   # Git compatibility tests (25)
+└── fs-compat.test.ts         # Node.js fs compatibility tests (69)
 ```
 
 ## Mock Implementation
@@ -414,9 +421,43 @@ All tests run automatically on:
 - Pull requests
 - Before releases
 
+## Hybrid Mode & Worker Support
+
+The library supports three operational modes:
+- **Main Thread Mode**: Direct OPFS access from main thread
+- **Worker Mode**: OPFS operations in a Web Worker (sync access handles)
+- **Hybrid Mode** (Recommended): Reads on main thread, writes on worker
+
+### Hybrid Mode API
+```javascript
+const fs = new OPFS({
+  workerUrl: new URL('@componentor/opfs-fs/worker-script', import.meta.url)
+})
+await fs.ready()
+
+// Operations automatically routed to optimal backend
+await fs.writeFile('test.txt', 'data')  // → worker
+const data = await fs.readFile('test.txt')  // → main thread
+
+// Garbage collection for long-running apps
+await fs.gc()
+
+// Clean up
+fs.terminate()
+```
+
+### Performance Results (100 iterations benchmark)
+| Mode | Average Time |
+|------|-------------|
+| Main Thread | ~335ms |
+| Worker Only | ~274ms |
+| **Hybrid** | **~262ms** |
+
 ## Future Test Additions
 
 Potential areas for expanded testing:
+- [ ] Hybrid mode unit tests
+- [ ] Worker communication tests
 - [ ] Memory usage tests
 - [ ] Stress tests with thousands of files
 - [ ] Real browser integration tests (E2E with Playwright/Puppeteer)

@@ -510,6 +510,44 @@ The following methods are implemented for API compatibility but are no-ops since
 - `utimes(path, atime, mtime)` - Timestamps are read-only
 - `lutimes(path, atime, mtime)` - Symlink timestamps are read-only
 
+### Lifecycle Methods (Hybrid Mode)
+
+These methods are used when running in hybrid mode (with `workerUrl`):
+
+#### `ready()`
+
+Wait for the worker to be initialized. Call this before performing any operations.
+
+```javascript
+const fs = new OPFS({ workerUrl: '...' })
+await fs.ready() // Wait for worker
+```
+
+#### `terminate()`
+
+Terminate the background worker. Call this when you're done using the filesystem.
+
+```javascript
+fs.terminate() // Clean up worker
+```
+
+#### `gc()`
+
+Force garbage collection by reinitializing the worker's OPFS instance. Use this for long-running applications to prevent memory leaks.
+
+```javascript
+// Periodically call gc() in long-running apps
+await fs.gc()
+```
+
+#### `resetCache()`
+
+Reset internal caches (symlinks, directory handles). Lighter than `gc()`.
+
+```javascript
+fs.resetCache()
+```
+
 ## 🎯 Real-World Examples
 
 ### Working with Isomorphic Git
