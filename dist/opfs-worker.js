@@ -794,30 +794,16 @@ var OPFSWorker = class {
     return result;
   }
   async writeFile(path, data, options) {
-    const transfer = [];
-    if (data instanceof Uint8Array) {
-      transfer.push(data.buffer);
-    }
-    await this.call("writeFile", [path, data, options], transfer);
+    await this.call("writeFile", [path, data, options]);
   }
   async readFileBatch(paths) {
     return this.call("readFileBatch", [paths]);
   }
   async writeFileBatch(entries) {
-    const transfer = [];
-    for (const entry of entries) {
-      if (entry.data instanceof Uint8Array) {
-        transfer.push(entry.data.buffer);
-      }
-    }
-    await this.call("writeFileBatch", [entries], transfer);
+    await this.call("writeFileBatch", [entries]);
   }
   async appendFile(path, data, options) {
-    const transfer = [];
-    if (data instanceof Uint8Array) {
-      transfer.push(data.buffer);
-    }
-    await this.call("appendFile", [path, data, options], transfer);
+    await this.call("appendFile", [path, data, options]);
   }
   async copyFile(src, dest, mode) {
     await this.call("copyFile", [src, dest, mode]);

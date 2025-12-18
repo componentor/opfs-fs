@@ -48,7 +48,7 @@ export interface OPFSWorkerOptions {
  * Benefits:
  * - Non-blocking main thread
  * - Uses sync access handles (faster) in the worker
- * - Zero-copy data transfer using Transferables
+ * - Compatible with libraries that reuse buffers (e.g., isomorphic-git)
  */
 export class OPFSWorker {
   private worker: Worker | null = null
@@ -164,12 +164,9 @@ export class OPFSWorker {
   }
 
   async writeFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void> {
-    const transfer: Transferable[] = []
-    if (data instanceof Uint8Array) {
-      // Transfer the buffer for zero-copy
-      transfer.push(data.buffer)
-    }
-    await this.call<void>('writeFile', [path, data, options], transfer)
+    // Note: We don't use Transferables here because the caller may reuse the buffer
+    // (e.g., isomorphic-git reuses buffers). Structured cloning copies the data.
+    await this.call<void>('writeFile', [path, data, options])
   }
 
   async readFileBatch(paths: string[]): Promise<BatchReadResult[]> {
@@ -177,21 +174,13 @@ export class OPFSWorker {
   }
 
   async writeFileBatch(entries: BatchWriteEntry[]): Promise<void> {
-    const transfer: Transferable[] = []
-    for (const entry of entries) {
-      if (entry.data instanceof Uint8Array) {
-        transfer.push(entry.data.buffer)
-      }
-    }
-    await this.call<void>('writeFileBatch', [entries], transfer)
+    // Note: We don't use Transferables here because the caller may reuse the buffers
+    await this.call<void>('writeFileBatch', [entries])
   }
 
   async appendFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void> {
-    const transfer: Transferable[] = []
-    if (data instanceof Uint8Array) {
-      transfer.push(data.buffer)
-    }
-    await this.call<void>('appendFile', [path, data, options], transfer)
+    // Note: We don't use Transferables here because the caller may reuse the buffer
+    await this.call<void>('appendFile', [path, data, options])
   }
 
   async copyFile(src: string, dest: string, mode?: number): Promise<void> {

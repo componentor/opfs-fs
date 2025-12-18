@@ -157,7 +157,7 @@ interface OPFSWorkerOptions {
  * Benefits:
  * - Non-blocking main thread
  * - Uses sync access handles (faster) in the worker
- * - Zero-copy data transfer using Transferables
+ * - Compatible with libraries that reuse buffers (e.g., isomorphic-git)
  */
 declare class OPFSWorker {
     private worker;

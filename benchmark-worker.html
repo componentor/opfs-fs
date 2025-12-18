@@ -80,6 +80,13 @@
     button.run-all:hover {
       background: #e64a19;
     }
+    button.lightning {
+      background: #ffc107;
+      color: #333;
+    }
+    button.lightning:hover {
+      background: #ffb300;
+    }
     #log {
       font-family: monospace;
       font-size: 12px;
@@ -99,7 +106,7 @@
     }
     .comparison {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
       gap: 20px;
       margin-top: 10px;
     }
@@ -117,6 +124,7 @@
     .comparison-value.main { color: #1976d2; }
     .comparison-value.worker { color: #7b1fa2; }
     .comparison-value.hybrid { color: #00897b; }
+    .comparison-value.lightning { color: #ff8f00; }
     .mode-desc {
       font-size: 12px;
       color: #666;
@@ -143,7 +151,10 @@
   </style>
 </head>
 <body>
-  <h1>OPFS-FS Benchmark: Main vs Worker vs Hybrid</h1>
+  <h1>OPFS-FS Benchmark: Main vs Worker vs Hybrid vs LightningFS</h1>
+
+  <!-- Load LightningFS UMD bundle (exposes global LightningFS) -->
+  <script src="./node_modules/@isomorphic-git/lightning-fs/dist/lightning-fs.min.js"></script>
 
   <div class="card">
     <p>Compare OPFS performance between different implementations:</p>
@@ -151,12 +162,14 @@
       <li><strong>Main Thread:</strong> Direct OPFS access, no message passing overhead for reads</li>
       <li><strong>Worker:</strong> Non-blocking, uses sync access handles (faster writes)</li>
       <li><strong>Hybrid:</strong> Best of both - main thread reads + worker writes</li>
+      <li><strong>LightningFS:</strong> isomorphic-git's IndexedDB filesystem (for comparison)</li>
     </ul>
     <div>
       <button id="runMain" onclick="runMainBenchmarks()">Run Main Thread</button>
       <button id="runWorker" class="secondary" onclick="runWorkerBenchmarks()">Run Worker</button>
       <button id="runHybrid" class="tertiary" onclick="runHybridBenchmarks()">Run Hybrid</button>
-      <button onclick="clearOPFS()">Clear OPFS Storage</button>
+      <button id="runLightning" class="lightning" onclick="runLightningBenchmarks()">Run LightningFS</button>
+      <button onclick="clearStorage()">Clear All Storage</button>
     </div>
     <div style="margin-top: 15px;">
       <button id="runAll" class="run-all" onclick="runAllBenchmarks()">Run All (Average)</button>
@@ -177,42 +190,47 @@
     <h3>Performance Comparison</h3>
     <div class="benchmark">
       <span class="benchmark-name">100 small file writes</span>
-      <div style="display: flex; gap: 10px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <span class="benchmark-result pending" id="main-writes">Main: --</span>
         <span class="benchmark-result pending" id="worker-writes">Worker: --</span>
         <span class="benchmark-result pending" id="hybrid-writes">Hybrid: --</span>
+        <span class="benchmark-result pending" id="lightning-writes">Lightning: --</span>
       </div>
     </div>
     <div class="benchmark">
       <span class="benchmark-name">100 small file reads</span>
-      <div style="display: flex; gap: 10px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <span class="benchmark-result pending" id="main-reads">Main: --</span>
         <span class="benchmark-result pending" id="worker-reads">Worker: --</span>
         <span class="benchmark-result pending" id="hybrid-reads">Hybrid: --</span>
+        <span class="benchmark-result pending" id="lightning-reads">Lightning: --</span>
       </div>
     </div>
     <div class="benchmark">
       <span class="benchmark-name">100 batch writes</span>
-      <div style="display: flex; gap: 10px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <span class="benchmark-result pending" id="main-batch-writes">Main: --</span>
         <span class="benchmark-result pending" id="worker-batch-writes">Worker: --</span>
         <span class="benchmark-result pending" id="hybrid-batch-writes">Hybrid: --</span>
+        <span class="benchmark-result pending" id="lightning-batch-writes">Lightning: --</span>
       </div>
     </div>
     <div class="benchmark">
       <span class="benchmark-name">100 batch reads</span>
-      <div style="display: flex; gap: 10px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <span class="benchmark-result pending" id="main-batch-reads">Main: --</span>
         <span class="benchmark-result pending" id="worker-batch-reads">Worker: --</span>
         <span class="benchmark-result pending" id="hybrid-batch-reads">Hybrid: --</span>
+        <span class="benchmark-result pending" id="lightning-batch-reads">Lightning: --</span>
       </div>
     </div>
     <div class="benchmark">
       <span class="benchmark-name">50 symlinks (batch)</span>
-      <div style="display: flex; gap: 10px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <span class="benchmark-result pending" id="main-symlinks">Main: --</span>
         <span class="benchmark-result pending" id="worker-symlinks">Worker: --</span>
         <span class="benchmark-result pending" id="hybrid-symlinks">Hybrid: --</span>
+        <span class="benchmark-result pending" id="lightning-symlinks">Lightning: N/A</span>
       </div>
     </div>
   </div>
@@ -224,17 +242,22 @@
       <div class="comparison-col">
         <h4>Main Thread Total</h4>
         <div class="comparison-value main" id="main-total">--</div>
-        <div class="mode-desc">read: main, write: main</div>
+        <div class="mode-desc">OPFS (main thread)</div>
       </div>
       <div class="comparison-col">
         <h4>Worker Total</h4>
         <div class="comparison-value worker" id="worker-total">--</div>
-        <div class="mode-desc">read: worker, write: worker</div>
+        <div class="mode-desc">OPFS (worker)</div>
       </div>
       <div class="comparison-col">
         <h4>Hybrid Total</h4>
         <div class="comparison-value hybrid" id="hybrid-total">--</div>
-        <div class="mode-desc">read: main, write: worker</div>
+        <div class="mode-desc">OPFS (hybrid)</div>
+      </div>
+      <div class="comparison-col">
+        <h4>LightningFS Total</h4>
+        <div class="comparison-value lightning" id="lightning-total">--</div>
+        <div class="mode-desc">IndexedDB</div>
       </div>
     </div>
   </div>
@@ -245,13 +268,18 @@
     import { OPFSWorker } from './dist/opfs-worker-proxy.js';
     import { OPFSHybrid } from './dist/opfs-hybrid.js';
 
+    // LightningFS loaded via UMD bundle (global variable from script tag above)
+    // Note: LightningFS uses IndexedDB which has different performance characteristics than OPFS
+
     const mainFs = new OPFS({ useSync: false, verbose: false });
     let workerFs = null;
     let hybridFs = null;
+    let lightningFs = null;
 
     let mainResults = {};
     let workerResults = {};
     let hybridResults = {};
+    let lightningResults = {};
 
     function log(msg) {
       const el = document.getElementById('log');
@@ -287,13 +315,142 @@
       }
     }
 
-    async function runBenchmarkSilent(fn) {
+    async function clearLightningFS() {
+      lightningFs = null;
+      // Delete the IndexedDB database directly and wait for it
+      try {
+        await new Promise((resolve, reject) => {
+          const req = indexedDB.deleteDatabase('benchmark-lightning-fs');
+          req.onsuccess = resolve;
+          req.onerror = () => resolve(); // Ignore errors
+          req.onblocked = () => resolve();
+        });
+        // Small delay to ensure database is fully deleted
+        await new Promise(r => setTimeout(r, 50));
+      } catch (e) {
+        // Ignore
+      }
+    }
+
+    async function initLightning() {
+      if (typeof LightningFS === 'undefined') {
+        throw new Error('LightningFS not loaded - check that the UMD bundle is available');
+      }
+      // Create fresh instance (without wipe - we deleted the DB above)
+      lightningFs = new LightningFS('benchmark-lightning-fs');
+      log('  LightningFS instance created');
+
+      // Initialize by doing a simple write/read to ensure DB is ready
+      try {
+        await lightningFs.promises.writeFile('/init-test.txt', 'test');
+        await lightningFs.promises.unlink('/init-test.txt');
+        log('  LightningFS initialization verified');
+      } catch (e) {
+        log('  LightningFS init error: ' + e.message);
+        throw e;
+      }
+      return lightningFs;
+    }
+
+    // LightningFS wrapper to match OPFS-FS API
+    // Uses a getter to always get the current LightningFS instance
+    function createLightningWrapper() {
+      // Helper to get current promises API
+      const pfs = () => lightningFs.promises;
+
+      // Helper to ensure directory exists
+      async function ensureDir(path) {
+        const parts = path.split('/').filter(p => p);
+        let dir = '';
+        for (let i = 0; i < parts.length - 1; i++) {
+          dir += '/' + parts[i];
+          try {
+            await pfs().mkdir(dir);
+          } catch (e) {
+            // Directory may already exist (EEXIST) - ignore
+          }
+        }
+      }
+
+      return {
+        async writeFile(path, data) {
+          await ensureDir(path);
+          await pfs().writeFile(path, data);
+        },
+        async readFile(path) {
+          return await pfs().readFile(path, { encoding: 'utf8' });
+        },
+        async writeFileBatch(entries) {
+          for (const entry of entries) {
+            await this.writeFile(entry.path, entry.data);
+          }
+        },
+        async readFileBatch(paths) {
+          const results = [];
+          for (const path of paths) {
+            try {
+              const data = await this.readFile(path);
+              results.push({ path, data });
+            } catch (e) {
+              results.push({ path, data: null, error: e });
+            }
+          }
+          return results;
+        },
+        async rmdir(path) {
+          try {
+            let entries;
+            try {
+              entries = await pfs().readdir(path);
+            } catch (e) {
+              return; // Directory doesn't exist
+            }
+            for (const entry of entries) {
+              const fullPath = path === '/' ? '/' + entry : path + '/' + entry;
+              try {
+                const stat = await pfs().stat(fullPath);
+                if (stat.isDirectory()) {
+                  await this.rmdir(fullPath);
+                } else {
+                  await pfs().unlink(fullPath);
+                }
+              } catch (e) {
+                // Ignore
+              }
+            }
+            if (path !== '/') {
+              await pfs().rmdir(path).catch(() => {});
+            }
+          } catch (e) {
+            // Ignore
+          }
+        },
+        async symlinkBatch(links) {
+          for (const { target, path } of links) {
+            await ensureDir(path);
+            try {
+              await pfs().symlink(target, path);
+            } catch (e) {
+              if (e.code === 'EEXIST') continue;
+              throw e;
+            }
+          }
+        },
+        async gc() {
+          // Clear and reinitialize LightningFS
+          await clearLightningFS();
+          await initLightning();
+        }
+      };
+    }
+
+    async function runBenchmarkSilent(fn, name = '') {
       try {
         const start = performance.now();
         await fn();
         return performance.now() - start;
       } catch (e) {
-        console.error(e);
+        console.error(`Benchmark error${name ? ` (${name})` : ''}:`, e);
         return -1;
       }
     }
@@ -313,21 +470,27 @@
 
     async function runBenchmark(name, fn) {
       log(`Running: ${name}`);
-      const duration = await runBenchmarkSilent(fn);
-      if (duration > 0) {
+      try {
+        const start = performance.now();
+        await fn();
+        const duration = performance.now() - start;
         log(`  Completed in ${duration.toFixed(2)}ms`);
-      } else {
-        log(`  Error`);
+        return duration;
+      } catch (e) {
+        log(`  Error: ${e.message || e}`);
+        console.error(`Benchmark error (${name}):`, e);
+        return -1;
       }
-      return duration;
     }
 
     // Core benchmark function that can run silently or with logging
     async function runCoreBenchmarks(fs, prefix, silent = false) {
       const results = {};
 
-      // Clear storage
-      await clearOPFS(fs);
+      // Clear storage (skip for lightning since it's wiped on init)
+      if (prefix !== 'lightning') {
+        await clearOPFS(fs);
+      }
       if (silent) await yieldToMain();
 
       // Small file writes - yield every 25 operations to prevent freeze
@@ -527,11 +690,59 @@
       btn.textContent = 'Run Hybrid';
     };
 
+    window.runLightningBenchmarks = async function() {
+      const btn = document.getElementById('runLightning');
+      btn.disabled = true;
+      btn.textContent = 'Running...';
+      document.getElementById('log').textContent = '';
+
+      log('Starting LightningFS Benchmarks');
+      log('===============================');
+      log('Backend: IndexedDB');
+
+      try {
+        if (typeof LightningFS === 'undefined') {
+          throw new Error('LightningFS not loaded - check that the UMD bundle is available');
+        }
+        log('Initializing LightningFS...');
+        await clearLightningFS();
+        await initLightning();
+        const wrapper = createLightningWrapper();
+        log('LightningFS ready!\n');
+
+        lightningResults = await runCoreBenchmarks(wrapper, 'lightning', false);
+
+        if (lightningResults.writes > 0) setResult('lightning-writes', lightningResults.writes);
+        else setResult('lightning-writes', 0, true);
+        if (lightningResults.reads > 0) setResult('lightning-reads', lightningResults.reads);
+        else setResult('lightning-reads', 0, true);
+        if (lightningResults.batchWrites > 0) setResult('lightning-batch-writes', lightningResults.batchWrites);
+        else setResult('lightning-batch-writes', 0, true);
+        if (lightningResults.batchReads > 0) setResult('lightning-batch-reads', lightningResults.batchReads);
+        else setResult('lightning-batch-reads', 0, true);
+        if (lightningResults.symlinks > 0) setResult('lightning-symlinks', lightningResults.symlinks);
+        else setResult('lightning-symlinks', 0, true);
+
+        const total = Object.values(lightningResults).filter(v => v > 0).reduce((a, b) => a + b, 0);
+        document.getElementById('lightning-total').textContent = total.toFixed(2) + 'ms';
+        document.getElementById('comparison').style.display = 'grid';
+
+        log('\nLightningFS Complete!');
+        log(`Total: ${total.toFixed(2)}ms`);
+      } catch (e) {
+        log('LightningFS error: ' + e.message);
+        console.error(e);
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Run LightningFS';
+    };
+
     window.runAllBenchmarks = async function() {
       const iterations = parseInt(document.getElementById('iterations').value) || 10;
       const sequential = document.getElementById('sequential').checked;
       const btn = document.getElementById('runAll');
-      const btns = ['runMain', 'runWorker', 'runHybrid', 'runAll'].map(id => document.getElementById(id));
+      const btns = ['runMain', 'runWorker', 'runHybrid', 'runLightning', 'runAll'].map(id => document.getElementById(id));
 
       btns.forEach(b => b.disabled = true);
       btn.textContent = 'Running...';
@@ -542,13 +753,22 @@
       log('='.repeat(50));
 
       // Initialize all backends
+      let lightningWrapper = null;
       try {
         log('Initializing backends...');
         await initWorker();
         await initHybrid();
+        if (typeof LightningFS !== 'undefined') {
+          await clearLightningFS();
+          await initLightning();
+          lightningWrapper = createLightningWrapper();
+        } else {
+          log('  LightningFS not available, skipping');
+        }
         log('All backends ready!\n');
       } catch (e) {
         log('Init error: ' + e.message);
+        console.error(e);
         btns.forEach(b => b.disabled = false);
         btn.textContent = 'Run All (Average)';
         return;
@@ -557,7 +777,8 @@
       const allResults = {
         main: { totals: [], writes: [], reads: [], batchWrites: [], batchReads: [], symlinks: [] },
         worker: { totals: [], writes: [], reads: [], batchWrites: [], batchReads: [], symlinks: [] },
-        hybrid: { totals: [], writes: [], reads: [], batchWrites: [], batchReads: [], symlinks: [] }
+        hybrid: { totals: [], writes: [], reads: [], batchWrites: [], batchReads: [], symlinks: [] },
+        lightning: { totals: [], writes: [], reads: [], batchWrites: [], batchReads: [], symlinks: [] }
       };
 
       const backends = [
@@ -565,6 +786,9 @@
         { name: 'worker', getFs: () => workerFs, prefix: 'worker' },
         { name: 'hybrid', getFs: () => hybridFs, prefix: 'hybrid' }
       ];
+      if (lightningWrapper) {
+        backends.push({ name: 'lightning', getFs: () => lightningWrapper, prefix: 'lightning' });
+      }
 
       // Helper to run one iteration for one backend
       async function runIteration(name, fs, prefix, iterNum) {
@@ -643,7 +867,7 @@
       log(`RESULTS (${iterations} iterations)`);
       log('='.repeat(50));
 
-      for (const name of ['main', 'worker', 'hybrid']) {
+      for (const name of ['main', 'worker', 'hybrid', 'lightning']) {
         const data = allResults[name];
         const avgTotal = avg(data.totals);
         const std = stdDev(data.totals);
@@ -669,11 +893,19 @@
       const mainAvg = avg(allResults.main.totals);
       const workerAvg = avg(allResults.worker.totals);
       const hybridAvg = avg(allResults.hybrid.totals);
-      const minAvg = Math.min(mainAvg, workerAvg, hybridAvg);
-      const winner = minAvg === mainAvg ? 'MAIN' : minAvg === workerAvg ? 'WORKER' : 'HYBRID';
+      const lightningAvg = avg(allResults.lightning.totals);
+      const minAvg = Math.min(mainAvg, workerAvg, hybridAvg, lightningAvg);
+      let winner = 'MAIN';
+      if (minAvg === workerAvg) winner = 'WORKER';
+      else if (minAvg === hybridAvg) winner = 'HYBRID';
+      else if (minAvg === lightningAvg) winner = 'LIGHTNING';
 
       log('\n' + '='.repeat(50));
       log(`WINNER: ${winner} (${minAvg.toFixed(2)}ms average)`);
+      log(`\nSpeedup vs LightningFS:`);
+      log(`  Main:   ${(lightningAvg / mainAvg).toFixed(2)}x`);
+      log(`  Worker: ${(lightningAvg / workerAvg).toFixed(2)}x`);
+      log(`  Hybrid: ${(lightningAvg / hybridAvg).toFixed(2)}x`);
       log('='.repeat(50));
 
       document.getElementById('comparison').style.display = 'grid';
@@ -683,10 +915,11 @@
       btn.textContent = 'Run All (Average)';
     };
 
-    window.clearOPFS = async () => {
-      log('Clearing OPFS storage...');
+    window.clearStorage = async () => {
+      log('Clearing all storage...');
       await clearOPFS();
-      log('OPFS storage cleared');
+      await clearLightningFS();
+      log('All storage cleared (OPFS + IndexedDB)');
     };
 
     // Check OPFS support
@@ -698,6 +931,7 @@
       document.getElementById('runAll').disabled = true;
     } else {
       log('OPFS is supported. Click buttons to run benchmarks.');
+      log('Compare: Main Thread vs Worker vs Hybrid modes.');
     }
   </script>
 </body>
