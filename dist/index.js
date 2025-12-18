@@ -72,6 +72,9 @@ function createELOOP(path) {
 function createEINVAL(path) {
   return new FSError(`EINVAL: Invalid argument, '${path}'`, "EINVAL", { path });
 }
+function createECORRUPTED(path) {
+  return new FSError(`ECORRUPTED: Pack file integrity check failed, '${path}'`, "ECORRUPTED", { path });
+}
 function wrapError(err) {
   if (err instanceof FSError) return err;
   const error = err;
@@ -130,11 +133,6 @@ function dirname(path) {
   const parts = normalized.split("/").filter(Boolean);
   if (parts.length < 2) return "/";
   return "/" + parts.slice(0, -1).join("/");
-}
-function basename(path) {
-  const normalized = normalize(path);
-  const parts = normalized.split("/").filter(Boolean);
-  return parts[parts.length - 1] || "";
 }
 function isRoot(path) {
   const normalized = normalize(path);
@@ -578,6 +576,314 @@ var SymlinkManager = class {
    */
   isMetadataFile(name) {
     return name === SYMLINK_FILE.replace(/^\/+/, "");
+  }
+};
+
+// src/packed-storage.ts
+var CRC32_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let j = 0; j < 8; j++) {
+    c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+  }
+  CRC32_TABLE[i] = c;
+}
+function crc32(data) {
+  let crc = 4294967295;
+  for (let i = 0; i < data.length; i++) {
+    crc = CRC32_TABLE[(crc ^ data[i]) & 255] ^ crc >>> 8;
+  }
+  return (crc ^ 4294967295) >>> 0;
+}
+var PACK_FILE = "/.opfs-pack";
+var PackedStorage = class {
+  handleManager;
+  useSync;
+  index = null;
+  indexLoaded = false;
+  constructor(handleManager, useSync) {
+    this.handleManager = handleManager;
+    this.useSync = useSync;
+  }
+  /**
+   * Reset pack storage state (memory only)
+   */
+  reset() {
+    this.index = null;
+    this.indexLoaded = false;
+  }
+  /**
+   * Clear pack storage completely (deletes pack file from disk)
+   */
+  async clear() {
+    this.index = null;
+    this.indexLoaded = false;
+    try {
+      const root = await this.handleManager.getRoot();
+      await root.removeEntry(PACK_FILE.replace(/^\//, ""));
+    } catch {
+    }
+  }
+  /**
+   * Load pack index from disk (always reloads to support hybrid mode)
+   * Verifies CRC32 checksum for integrity
+   */
+  async loadIndex() {
+    try {
+      const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
+      if (!fileHandle) {
+        return {};
+      }
+      if (this.useSync) {
+        const access = await fileHandle.createSyncAccessHandle();
+        const size = access.getSize();
+        if (size < 8) {
+          access.close();
+          return {};
+        }
+        const header = new Uint8Array(8);
+        access.read(header, { at: 0 });
+        const view = new DataView(header.buffer);
+        const indexLen = view.getUint32(0, true);
+        const storedCrc = view.getUint32(4, true);
+        const contentSize = size - 8;
+        const content = new Uint8Array(contentSize);
+        access.read(content, { at: 8 });
+        access.close();
+        const calculatedCrc = crc32(content);
+        if (calculatedCrc !== storedCrc) {
+          throw createECORRUPTED(PACK_FILE);
+        }
+        const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
+        return JSON.parse(indexJson);
+      } else {
+        const file = await fileHandle.getFile();
+        const data = new Uint8Array(await file.arrayBuffer());
+        if (data.length < 8) {
+          return {};
+        }
+        const view = new DataView(data.buffer);
+        const indexLen = view.getUint32(0, true);
+        const storedCrc = view.getUint32(4, true);
+        const content = data.subarray(8);
+        const calculatedCrc = crc32(content);
+        if (calculatedCrc !== storedCrc) {
+          throw createECORRUPTED(PACK_FILE);
+        }
+        const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
+        return JSON.parse(indexJson);
+      }
+    } catch {
+      return {};
+    }
+  }
+  /**
+   * Check if a path exists in the pack
+   */
+  async has(path) {
+    const index = await this.loadIndex();
+    return path in index;
+  }
+  /**
+   * Get file size from pack (for stat)
+   */
+  async getSize(path) {
+    const index = await this.loadIndex();
+    const entry = index[path];
+    return entry ? entry.size : null;
+  }
+  /**
+   * Read a file from the pack
+   */
+  async read(path) {
+    const index = await this.loadIndex();
+    const entry = index[path];
+    if (!entry) return null;
+    const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
+    if (!fileHandle) return null;
+    const buffer = new Uint8Array(entry.size);
+    if (this.useSync) {
+      const access = await fileHandle.createSyncAccessHandle();
+      access.read(buffer, { at: entry.offset });
+      access.close();
+    } else {
+      const file = await fileHandle.getFile();
+      const data = new Uint8Array(await file.arrayBuffer());
+      buffer.set(data.subarray(entry.offset, entry.offset + entry.size));
+    }
+    return buffer;
+  }
+  /**
+   * Read multiple files from the pack in a single operation
+   * Loads index once, reads all data in parallel
+   */
+  async readBatch(paths) {
+    const results = /* @__PURE__ */ new Map();
+    if (paths.length === 0) return results;
+    const index = await this.loadIndex();
+    const toRead = [];
+    for (const path of paths) {
+      const entry = index[path];
+      if (entry) {
+        toRead.push({ path, offset: entry.offset, size: entry.size });
+      } else {
+        results.set(path, null);
+      }
+    }
+    if (toRead.length === 0) return results;
+    const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
+    if (!fileHandle) {
+      for (const { path } of toRead) {
+        results.set(path, null);
+      }
+      return results;
+    }
+    if (this.useSync) {
+      const access = await fileHandle.createSyncAccessHandle();
+      for (const { path, offset, size } of toRead) {
+        const buffer = new Uint8Array(size);
+        access.read(buffer, { at: offset });
+        results.set(path, buffer);
+      }
+      access.close();
+    } else {
+      const file = await fileHandle.getFile();
+      const data = new Uint8Array(await file.arrayBuffer());
+      for (const { path, offset, size } of toRead) {
+        const buffer = new Uint8Array(size);
+        buffer.set(data.subarray(offset, offset + size));
+        results.set(path, buffer);
+      }
+    }
+    return results;
+  }
+  /**
+   * Write multiple files to the pack in a single operation
+   * This is the key optimization - 100 files become 1 write!
+   * Includes CRC32 checksum for integrity verification.
+   * Note: This replaces the entire pack with the new entries
+   */
+  async writeBatch(entries) {
+    if (entries.length === 0) return;
+    const encoder = new TextEncoder();
+    let totalDataSize = 0;
+    for (const { data } of entries) {
+      totalDataSize += data.length;
+    }
+    const newIndex = {};
+    let headerSize = 8;
+    let prevHeaderSize = 0;
+    while (headerSize !== prevHeaderSize) {
+      prevHeaderSize = headerSize;
+      let currentOffset = headerSize;
+      for (const { path, data } of entries) {
+        newIndex[path] = { offset: currentOffset, size: data.length };
+        currentOffset += data.length;
+      }
+      const indexBuf = encoder.encode(JSON.stringify(newIndex));
+      headerSize = 8 + indexBuf.length;
+    }
+    const finalIndexBuf = encoder.encode(JSON.stringify(newIndex));
+    const totalSize = headerSize + totalDataSize;
+    const packBuffer = new Uint8Array(totalSize);
+    const view = new DataView(packBuffer.buffer);
+    packBuffer.set(finalIndexBuf, 8);
+    for (const { path, data } of entries) {
+      const entry = newIndex[path];
+      packBuffer.set(data, entry.offset);
+    }
+    const content = packBuffer.subarray(8);
+    const checksum = crc32(content);
+    view.setUint32(0, finalIndexBuf.length, true);
+    view.setUint32(4, checksum, true);
+    await this.writePackFile(packBuffer);
+    this.index = newIndex;
+  }
+  /**
+   * Write the pack file to OPFS
+   */
+  async writePackFile(data) {
+    const { fileHandle } = await this.handleManager.getHandle(PACK_FILE, { create: true });
+    if (!fileHandle) return;
+    if (this.useSync) {
+      const access = await fileHandle.createSyncAccessHandle();
+      access.truncate(data.length);
+      access.write(data, { at: 0 });
+      access.close();
+    } else {
+      const writable = await fileHandle.createWritable();
+      await writable.write(data);
+      await writable.close();
+    }
+  }
+  /**
+   * Remove a path from the pack index
+   * Note: Doesn't reclaim space, just removes from index and recalculates CRC32
+   */
+  async remove(path) {
+    const index = await this.loadIndex();
+    if (!(path in index)) return false;
+    delete index[path];
+    const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
+    if (!fileHandle) return true;
+    const encoder = new TextEncoder();
+    const newIndexBuf = encoder.encode(JSON.stringify(index));
+    if (this.useSync) {
+      const access = await fileHandle.createSyncAccessHandle();
+      const size = access.getSize();
+      const oldHeader = new Uint8Array(8);
+      access.read(oldHeader, { at: 0 });
+      const oldIndexLen = new DataView(oldHeader.buffer).getUint32(0, true);
+      const dataStart = 8 + oldIndexLen;
+      const dataSize = size - dataStart;
+      const dataPortion = new Uint8Array(dataSize);
+      if (dataSize > 0) {
+        access.read(dataPortion, { at: dataStart });
+      }
+      const newContent = new Uint8Array(newIndexBuf.length + dataSize);
+      newContent.set(newIndexBuf, 0);
+      if (dataSize > 0) {
+        newContent.set(dataPortion, newIndexBuf.length);
+      }
+      const checksum = crc32(newContent);
+      const newHeader = new Uint8Array(8);
+      const view = new DataView(newHeader.buffer);
+      view.setUint32(0, newIndexBuf.length, true);
+      view.setUint32(4, checksum, true);
+      const newFile = new Uint8Array(8 + newContent.length);
+      newFile.set(newHeader, 0);
+      newFile.set(newContent, 8);
+      access.truncate(newFile.length);
+      access.write(newFile, { at: 0 });
+      access.close();
+    } else {
+      const file = await fileHandle.getFile();
+      const oldData = new Uint8Array(await file.arrayBuffer());
+      if (oldData.length < 8) return true;
+      const oldIndexLen = new DataView(oldData.buffer).getUint32(0, true);
+      const dataStart = 8 + oldIndexLen;
+      const dataPortion = oldData.subarray(dataStart);
+      const newContent = new Uint8Array(newIndexBuf.length + dataPortion.length);
+      newContent.set(newIndexBuf, 0);
+      newContent.set(dataPortion, newIndexBuf.length);
+      const checksum = crc32(newContent);
+      const newFile = new Uint8Array(8 + newContent.length);
+      const view = new DataView(newFile.buffer);
+      view.setUint32(0, newIndexBuf.length, true);
+      view.setUint32(4, checksum, true);
+      newFile.set(newContent, 8);
+      const writable = await fileHandle.createWritable();
+      await writable.write(newFile);
+      await writable.close();
+    }
+    return true;
+  }
+  /**
+   * Check if pack file is being used (has entries)
+   */
+  async isEmpty() {
+    const index = await this.loadIndex();
+    return Object.keys(index).length === 0;
   }
 };
 
@@ -1119,6 +1425,7 @@ var OPFS = class {
   verbose;
   handleManager;
   symlinkManager;
+  packedStorage;
   watchCallbacks = /* @__PURE__ */ new Map();
   tmpCounter = 0;
   /** Hybrid instance when workerUrl is provided */
@@ -1138,10 +1445,12 @@ var OPFS = class {
       this.useSync = false;
       this.handleManager = new HandleManager();
       this.symlinkManager = new SymlinkManager(this.handleManager, false);
+      this.packedStorage = new PackedStorage(this.handleManager, false);
     } else {
       this.useSync = useSync && typeof FileSystemFileHandle !== "undefined" && "createSyncAccessHandle" in FileSystemFileHandle.prototype;
       this.handleManager = new HandleManager();
       this.symlinkManager = new SymlinkManager(this.handleManager, this.useSync);
+      this.packedStorage = new PackedStorage(this.handleManager, this.useSync);
     }
   }
   /**
@@ -1208,22 +1517,30 @@ var OPFS = class {
     try {
       const normalizedPath = normalize(path);
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
-      const fileHandle = await this.handleManager.getPooledFileHandle(resolvedPath);
-      if (!fileHandle) {
-        throw createENOENT(path);
+      let fileHandle = null;
+      try {
+        fileHandle = await this.handleManager.getPooledFileHandle(resolvedPath);
+      } catch {
       }
-      let buffer;
-      if (this.useSync) {
-        const access = await fileHandle.createSyncAccessHandle();
-        const size = access.getSize();
-        buffer = new Uint8Array(size);
-        access.read(buffer);
-        access.close();
-      } else {
-        const file = await fileHandle.getFile();
-        buffer = new Uint8Array(await file.arrayBuffer());
+      if (fileHandle) {
+        let buffer;
+        if (this.useSync) {
+          const access = await fileHandle.createSyncAccessHandle();
+          const size = access.getSize();
+          buffer = new Uint8Array(size);
+          access.read(buffer);
+          access.close();
+        } else {
+          const file = await fileHandle.getFile();
+          buffer = new Uint8Array(await file.arrayBuffer());
+        }
+        return options.encoding ? new TextDecoder(options.encoding).decode(buffer) : buffer;
       }
-      return options.encoding ? new TextDecoder(options.encoding).decode(buffer) : buffer;
+      const packedData = await this.packedStorage.read(resolvedPath);
+      if (packedData) {
+        return options.encoding ? new TextDecoder(options.encoding).decode(packedData) : packedData;
+      }
+      throw createENOENT(path);
     } catch (err) {
       this.logError("readFile", err);
       throw wrapError(err);
@@ -1231,7 +1548,7 @@ var OPFS = class {
   }
   /**
    * Read multiple files efficiently in a batch operation
-   * More performant than multiple readFile calls for bulk operations
+   * Uses packed storage batch read (single index load), falls back to individual files
    * Returns results in the same order as input paths
    */
   async readFileBatch(paths) {
@@ -1242,56 +1559,49 @@ var OPFS = class {
     if (paths.length === 0) return [];
     try {
       const resolvedPaths = await Promise.all(
-        paths.map(async (path, index) => {
+        paths.map(async (path) => {
           const normalizedPath = normalize(path);
-          const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
-          return { index, resolvedPath };
+          return this.symlinkManager.resolve(normalizedPath);
         })
       );
-      const byParent = /* @__PURE__ */ new Map();
-      for (const { index, resolvedPath } of resolvedPaths) {
-        const parentPath = dirname(resolvedPath);
-        const name = basename(resolvedPath);
-        if (!byParent.has(parentPath)) {
-          byParent.set(parentPath, []);
-        }
-        byParent.get(parentPath).push({ index, name, resolvedPath });
-      }
+      const packedResults = await this.packedStorage.readBatch(resolvedPaths);
       const results = new Array(paths.length);
-      await Promise.all(
-        Array.from(byParent.entries()).map(async ([parentPath, files]) => {
-          let parentHandle;
-          try {
-            parentHandle = await this.handleManager.getDirectoryHandle(parentPath);
-          } catch {
-            for (const { index } of files) {
-              results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) };
-            }
-            return;
-          }
-          await Promise.all(
-            files.map(async ({ index, name }) => {
-              try {
-                const fileHandle = await parentHandle.getFileHandle(name);
-                let buffer;
-                if (this.useSync) {
-                  const access = await fileHandle.createSyncAccessHandle();
-                  const size = access.getSize();
-                  buffer = new Uint8Array(size);
-                  access.read(buffer);
-                  access.close();
-                } else {
-                  const file = await fileHandle.getFile();
-                  buffer = new Uint8Array(await file.arrayBuffer());
-                }
-                results[index] = { path: paths[index], data: buffer };
-              } catch (err) {
-                results[index] = { path: paths[index], data: null, error: err };
+      const needsIndividualRead = [];
+      for (let i = 0; i < paths.length; i++) {
+        const packedData = packedResults.get(resolvedPaths[i]);
+        if (packedData) {
+          results[i] = { path: paths[i], data: packedData };
+        } else {
+          needsIndividualRead.push({ index: i, resolvedPath: resolvedPaths[i] });
+        }
+      }
+      if (needsIndividualRead.length > 0) {
+        await Promise.all(
+          needsIndividualRead.map(async ({ index, resolvedPath }) => {
+            try {
+              const fileHandle = await this.handleManager.getPooledFileHandle(resolvedPath);
+              if (!fileHandle) {
+                results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) };
+                return;
               }
-            })
-          );
-        })
-      );
+              let buffer;
+              if (this.useSync) {
+                const access = await fileHandle.createSyncAccessHandle();
+                const size = access.getSize();
+                buffer = new Uint8Array(size);
+                access.read(buffer);
+                access.close();
+              } else {
+                const file = await fileHandle.getFile();
+                buffer = new Uint8Array(await file.arrayBuffer());
+              }
+              results[index] = { path: paths[index], data: buffer };
+            } catch (err) {
+              results[index] = { path: paths[index], data: null, error: err };
+            }
+          })
+        );
+      }
       return results;
     } catch (err) {
       this.logError("readFileBatch", err);
@@ -1328,7 +1638,7 @@ var OPFS = class {
   }
   /**
    * Write multiple files efficiently in a batch operation
-   * More performant than multiple writeFile calls for bulk operations
+   * Uses packed storage (single file) for maximum performance
    */
   async writeFileBatch(entries) {
     if (this.hybrid) {
@@ -1338,49 +1648,17 @@ var OPFS = class {
     if (entries.length === 0) return;
     try {
       const encoder = new TextEncoder();
-      const resolvedEntries = await Promise.all(
+      const packEntries = await Promise.all(
         entries.map(async ({ path, data }) => {
           const normalizedPath = normalize(path);
           const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
           return {
-            resolvedPath,
-            buffer: typeof data === "string" ? encoder.encode(data) : data
+            path: resolvedPath,
+            data: typeof data === "string" ? encoder.encode(data) : data
           };
         })
       );
-      const byParent = /* @__PURE__ */ new Map();
-      for (const { resolvedPath, buffer } of resolvedEntries) {
-        const parentPath = dirname(resolvedPath);
-        const name = basename(resolvedPath);
-        if (!byParent.has(parentPath)) {
-          byParent.set(parentPath, []);
-        }
-        byParent.get(parentPath).push({ name, buffer });
-      }
-      const parentPaths = Array.from(byParent.keys());
-      await Promise.all(parentPaths.map((parentPath) => this.handleManager.mkdir(parentPath)));
-      const parentHandles = await Promise.all(
-        parentPaths.map((parentPath) => this.handleManager.getDirectoryHandle(parentPath))
-      );
-      const handleMap = new Map(parentPaths.map((path, i) => [path, parentHandles[i]]));
-      await Promise.all(
-        Array.from(byParent.entries()).flatMap(([parentPath, files]) => {
-          const parentHandle = handleMap.get(parentPath);
-          return files.map(async ({ name, buffer }) => {
-            const fileHandle = await parentHandle.getFileHandle(name, { create: true });
-            if (this.useSync) {
-              const access = await fileHandle.createSyncAccessHandle();
-              access.truncate(buffer.length);
-              access.write(buffer, { at: 0 });
-              access.close();
-            } else {
-              const writable = await fileHandle.createWritable();
-              await writable.write(buffer);
-              await writable.close();
-            }
-          });
-        })
-      );
+      await this.packedStorage.writeBatch(packEntries);
     } catch (err) {
       this.logError("writeFileBatch", err);
       throw wrapError(err);
@@ -1424,6 +1702,7 @@ var OPFS = class {
           (name2) => root.removeEntry(name2, { recursive: true })
         );
         this.symlinkManager.reset();
+        this.packedStorage.reset();
         return;
       }
       const pathSegments = segments(normalizedPath);
@@ -1456,6 +1735,11 @@ var OPFS = class {
       const isSymlink = await this.symlinkManager.isSymlink(normalizedPath);
       if (isSymlink) {
         await this.symlinkManager.unlink(normalizedPath);
+        return;
+      }
+      const inPack = await this.packedStorage.has(normalizedPath);
+      if (inPack) {
+        await this.packedStorage.remove(normalizedPath);
         return;
       }
       const { dir, name, fileHandle } = await this.handleManager.getHandle(normalizedPath);
@@ -1593,6 +1877,21 @@ var OPFS = class {
           mtimeMs: 0,
           isFile: () => false,
           isDirectory: () => true,
+          isSymbolicLink: () => false
+        };
+      }
+      const packedSize = await this.packedStorage.getSize(resolvedPath);
+      if (packedSize !== null) {
+        return {
+          type: "file",
+          size: packedSize,
+          mode: 33188,
+          ctime: defaultDate,
+          ctimeMs: 0,
+          mtime: defaultDate,
+          mtimeMs: 0,
+          isFile: () => true,
+          isDirectory: () => false,
           isSymbolicLink: () => false
         };
       }
@@ -2219,7 +2518,7 @@ var OPFS = class {
     }
   }
   /**
-   * Reset internal symlink cache
+   * Reset internal caches
    * Useful when external processes modify the filesystem
    */
   resetCache() {
@@ -2228,6 +2527,7 @@ var OPFS = class {
       return;
     }
     this.symlinkManager.reset();
+    this.packedStorage.reset();
     this.handleManager.clearCache();
   }
   /**
@@ -2241,6 +2541,7 @@ var OPFS = class {
       return;
     }
     this.symlinkManager.reset();
+    await this.packedStorage.clear();
     this.handleManager.clearCache();
   }
 };

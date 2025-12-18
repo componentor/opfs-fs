@@ -57,9 +57,11 @@ class MockFileSystemFileHandle {
     const handle = this
     return {
       getSize: () => handle._content.length,
-      read: (buffer: Uint8Array) => {
-        buffer.set(handle._content)
-        return handle._content.length
+      read: (buffer: Uint8Array, options: { at?: number } = {}) => {
+        const at = options.at || 0
+        const bytesToRead = Math.min(buffer.length, handle._content.length - at)
+        buffer.set(handle._content.subarray(at, at + bytesToRead))
+        return bytesToRead
       },
       write: (data: Uint8Array, options: { at?: number } = {}) => {
         const at = options.at || 0

@@ -358,6 +358,7 @@ declare class OPFS {
     private verbose;
     private handleManager;
     private symlinkManager;
+    private packedStorage;
     private watchCallbacks;
     private tmpCounter;
     /** Hybrid instance when workerUrl is provided */
@@ -388,7 +389,7 @@ declare class OPFS {
     readFile(path: string, options?: ReadFileOptions): Promise<string | Uint8Array>;
     /**
      * Read multiple files efficiently in a batch operation
-     * More performant than multiple readFile calls for bulk operations
+     * Uses packed storage batch read (single index load), falls back to individual files
      * Returns results in the same order as input paths
      */
     readFileBatch(paths: string[]): Promise<BatchReadResult[]>;
@@ -398,7 +399,7 @@ declare class OPFS {
     writeFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void>;
     /**
      * Write multiple files efficiently in a batch operation
-     * More performant than multiple writeFile calls for bulk operations
+     * Uses packed storage (single file) for maximum performance
      */
     writeFileBatch(entries: BatchWriteEntry[]): Promise<void>;
     /**
@@ -528,7 +529,7 @@ declare class OPFS {
      */
     statfs(path?: string): Promise<StatFs>;
     /**
-     * Reset internal symlink cache
+     * Reset internal caches
      * Useful when external processes modify the filesystem
      */
     resetCache(): void;

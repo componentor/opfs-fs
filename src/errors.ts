@@ -63,6 +63,13 @@ export function createEINVAL(path: string): FSError {
 }
 
 /**
+ * Create ECORRUPTED (Data corruption detected) error
+ */
+export function createECORRUPTED(path: string): FSError {
+  return new FSError(`ECORRUPTED: Pack file integrity check failed, '${path}'`, 'ECORRUPTED', { path })
+}
+
+/**
  * Wrap an error with a standard code if it doesn't have one
  */
 export function wrapError(err: unknown): FSError {
