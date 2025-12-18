@@ -1,9 +1,21 @@
 {
   "name": "@componentor/opfs-fs",
-  "version": "1.0.17",
+  "version": "1.1.0",
   "description": "OPFS-based FS implementation for isomorphic-git",
-  "main": "index.js",
   "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/componentor/opfs-fs.git"
@@ -11,8 +23,12 @@
   "author": "Componentor",
   "license": "MIT",
   "scripts": {
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "npm run build && vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "opfs",
@@ -20,15 +36,19 @@
     "isomorphic-git",
     "filesystem",
     "browser",
-    "web"
+    "web",
+    "typescript"
   ],
   "bugs": {
     "url": "https://github.com/componentor/opfs-fs/issues"
   },
   "homepage": "https://github.com/componentor/opfs-fs#readme",
   "devDependencies": {
+    "@types/node": "^25.0.3",
     "happy-dom": "^20.0.10",
     "isomorphic-git": "^1.35.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
     "vitest": "^4.0.12"
   }
 }

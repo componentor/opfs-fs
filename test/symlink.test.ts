@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import OPFS from '../index.js'
+import OPFS from '../dist/index.js'
+import type { Dirent } from '../dist/index.js'
 
 describe('Symlink Support', () => {
-  let fs
+  let fs: OPFS
 
   beforeEach(() => {
     resetFileSystem()
@@ -226,17 +227,17 @@ describe('Symlink Support', () => {
       await fs.mkdir('/dir')
       await fs.symlink('/target.txt', '/link.txt')
 
-      const entries = await fs.readdir('/', { withFileTypes: true })
+      const entries = await fs.readdir('/', { withFileTypes: true }) as Dirent[]
 
-      const file = entries.find(e => e.name === 'file.txt')
+      const file = entries.find(e => e.name === 'file.txt')!
       expect(file.isFile()).toBe(true)
       expect(file.isSymbolicLink()).toBe(false)
 
-      const dir = entries.find(e => e.name === 'dir')
+      const dir = entries.find(e => e.name === 'dir')!
       expect(dir.isDirectory()).toBe(true)
       expect(dir.isSymbolicLink()).toBe(false)
 
-      const link = entries.find(e => e.name === 'link.txt')
+      const link = entries.find(e => e.name === 'link.txt')!
       expect(link.isSymbolicLink()).toBe(true)
       expect(link.isFile()).toBe(false)
       expect(link.isDirectory()).toBe(false)
@@ -256,8 +257,8 @@ describe('Symlink Support', () => {
       const entries = await fs.readdir('/subdir')
       expect(entries).toContain('link.txt')
 
-      const entriesWithTypes = await fs.readdir('/subdir', { withFileTypes: true })
-      const link = entriesWithTypes.find(e => e.name === 'link.txt')
+      const entriesWithTypes = await fs.readdir('/subdir', { withFileTypes: true }) as Dirent[]
+      const link = entriesWithTypes.find(e => e.name === 'link.txt')!
       expect(link.isSymbolicLink()).toBe(true)
     })
   })

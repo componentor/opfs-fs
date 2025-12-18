@@ -13,7 +13,8 @@
 - ⚡ **Isomorphic Git Ready** - Perfect companion for browser-based Git operations
 - 🔗 **Symlink Support** - Full symbolic link emulation for advanced file operations
 - 📦 **Zero Dependencies** - Lightweight and efficient
-- ✅ **Fully Tested** - 113 comprehensive tests with 100% pass rate
+- ✅ **Fully Tested** - 188 comprehensive tests with 100% pass rate
+- 📁 **Full fs Compatibility** - access, appendFile, copyFile, cp, rm, truncate, open, opendir, streams, and more
 
 ## 🚀 Installation
 
@@ -311,6 +312,155 @@ console.log('Files:', files)
 const rootFiles = await fs.readdir('.')
 ```
 
+### Additional File Operations
+
+#### `access(path, mode?)`
+
+Tests file accessibility. Throws if the file doesn't exist.
+
+```javascript
+await fs.access('/path/to/file') // Throws if not accessible
+```
+
+#### `appendFile(path, data)`
+
+Appends data to a file, creating it if it doesn't exist.
+
+```javascript
+await fs.appendFile('log.txt', 'New log entry\n')
+```
+
+#### `copyFile(src, dest, mode?)`
+
+Copies a file from source to destination.
+
+```javascript
+await fs.copyFile('original.txt', 'backup.txt')
+// With COPYFILE_EXCL flag to fail if dest exists
+await fs.copyFile('src.txt', 'dest.txt', fs.constants.COPYFILE_EXCL)
+```
+
+#### `cp(src, dest, options?)`
+
+Copies files or directories recursively.
+
+```javascript
+// Copy single file
+await fs.cp('file.txt', 'copy.txt')
+
+// Copy directory recursively
+await fs.cp('source-dir', 'dest-dir', { recursive: true })
+```
+
+#### `exists(path)`
+
+Returns true if the path exists, false otherwise (doesn't throw).
+
+```javascript
+if (await fs.exists('config.json')) {
+  // File exists
+}
+```
+
+#### `realpath(path)`
+
+Resolves symlinks to get the real path.
+
+```javascript
+const realPath = await fs.realpath('my-symlink')
+```
+
+#### `rm(path, options?)`
+
+Removes files or directories.
+
+```javascript
+await fs.rm('file.txt')
+await fs.rm('directory', { recursive: true })
+await fs.rm('maybe-exists', { force: true }) // No error if doesn't exist
+```
+
+#### `truncate(path, len?)`
+
+Truncates a file to the specified length.
+
+```javascript
+await fs.truncate('file.txt', 100) // Truncate to 100 bytes
+await fs.truncate('file.txt') // Truncate to 0 bytes
+```
+
+#### `mkdtemp(prefix)`
+
+Creates a unique temporary directory.
+
+```javascript
+const tempDir = await fs.mkdtemp('/tmp/myapp-')
+console.log(tempDir) // e.g., "/tmp/myapp-1234567890-abc123"
+```
+
+#### `open(path, flags?, mode?)`
+
+Opens a file and returns a FileHandle.
+
+```javascript
+const handle = await fs.open('file.txt', 'r')
+const buffer = new Uint8Array(100)
+await handle.read(buffer)
+await handle.close()
+```
+
+#### `opendir(path)`
+
+Opens a directory for iteration.
+
+```javascript
+const dir = await fs.opendir('/my-dir')
+for await (const entry of dir) {
+  console.log(entry.name, entry.isFile(), entry.isDirectory())
+}
+```
+
+#### `createReadStream(path, options?)`
+
+Creates a readable stream for a file.
+
+```javascript
+const stream = fs.createReadStream('large-file.bin')
+const reader = stream.getReader()
+// Read chunks...
+```
+
+#### `createWriteStream(path, options?)`
+
+Creates a writable stream for a file.
+
+```javascript
+const stream = fs.createWriteStream('output.txt')
+const writer = stream.getWriter()
+await writer.write(new TextEncoder().encode('data'))
+await writer.close()
+```
+
+#### `watch(path, options?)`
+
+Watches for file/directory changes (basic implementation).
+
+```javascript
+const watcher = fs.watch('/my-dir')
+for await (const event of watcher) {
+  console.log(event.eventType, event.filename)
+}
+```
+
+### Compatibility Methods (No-ops for OPFS)
+
+The following methods are implemented for API compatibility but are no-ops since OPFS doesn't support these features:
+
+- `chmod(path, mode)` - File modes not supported
+- `chown(path, uid, gid)` - File ownership not supported
+- `utimes(path, atime, mtime)` - Timestamps are read-only
+- `lutimes(path, atime, mtime)` - Symlink timestamps are read-only
+
 ## 🎯 Real-World Examples
 
 ### Working with Isomorphic Git
@@ -448,7 +598,7 @@ npm run test:watch
 ```
 
 **Test Coverage:**
-- ✅ 113 tests with 100% pass rate
+- ✅ 188 tests with 100% pass rate
 - ✅ File read/write operations (text and binary)
 - ✅ Directory operations (create, remove, list)
 - ✅ File metadata and statistics
@@ -459,6 +609,7 @@ npm run test:watch
 - ✅ Large file handling
 - ✅ Performance benchmarks
 - ✅ Git integration with symlinks (isomorphic-git compatibility)
+- ✅ Node.js fs compatibility (access, appendFile, copyFile, cp, rm, truncate, open, opendir, streams)
 
 See [SYMLINK_IMPLEMENTATION.md](SYMLINK_IMPLEMENTATION.md) for details on symlink support and [PERFORMANCE.md](PERFORMANCE.md) for performance analysis.
 

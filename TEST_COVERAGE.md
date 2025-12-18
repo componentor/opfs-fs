@@ -2,15 +2,16 @@
 
 ## Overview
 
-**Total Tests: 113**
+**Total Tests: 188**
 **Pass Rate: 100%**
-**Test Files: 4**
+**Test Files: 5**
 
 ```
 ✓ test/opfs.test.js            (53 tests)
 ✓ test/symlink.test.js         (36 tests)
 ✓ test/performance.test.js     (11 tests)
-✓ test/git-integration.test.js (13 tests)
+✓ test/git-integration.test.js (25 tests)
+✓ test/fs-compat.test.js       (63 tests)
 ```
 
 ## Test Breakdown by Category
@@ -165,32 +166,149 @@
 #### Sync vs Async Mode (1 test)
 - ✅ Compare sync and async performance
 
-### Git Integration Tests (13 tests)
+### Git Integration Tests (25 tests)
 
-#### Basic Git Operations (3 tests)
+#### Basic Git Operations (5 tests)
 - ✅ Initialize a git repository
 - ✅ Create commits
 - ✅ Read git status
+- ✅ Handle multiple branches
+- ✅ Read commit log
 
-#### Symlink Handling in Git (2 tests)
+#### Symlink Handling in Git (4 tests)
 - ✅ Create and commit a symlink
 - ✅ Handle symlink in readTree
+- ✅ Preserve symlink target after multiple commits
+- ✅ Handle symlink to file in subdirectory
 
-#### Simulate Clone-like Operations (2 tests)
-- ✅ Handle creating many files and symlinks like a clone operation
-- ✅ Handle symlinks in subdirectories during checkout-like operations
+#### Clone-like Operations (3 tests)
+- ✅ Handle realistic repo structure with symlinks
+- ✅ Handle deeply nested symlinks
+- ✅ Handle cross-directory symlinks
 
-#### Git Checkout with Symlinks (1 test)
-- ✅ Persist symlinks after commit
-
-#### Edge Cases with Git and Symlinks (3 tests)
+#### Edge Cases with Git and Symlinks (5 tests)
 - ✅ Handle symlink chain in git repo
 - ✅ Handle broken symlink in git repo
-- ✅ Handle directory with symlinks in git operations
+- ✅ Handle directory with many symlinks
+- ✅ Handle replacing file with symlink
+- ✅ Handle special characters in symlink paths
 
-#### Performance with Git Operations (2 tests)
-- ✅ Handle multiple file operations efficiently (50 files)
-- ✅ Handle multiple symlinks efficiently (20 symlinks with batch)
+#### Git Operations After Symlink Changes (2 tests)
+- ✅ Detect symlink target changes in status
+- ✅ Handle git diff with symlinks
+
+#### Performance Benchmarks (4 tests)
+- ✅ Handle 100 files + commit efficiently
+- ✅ Handle 50 symlinks with batch operation efficiently
+- ✅ Handle concurrent git operations
+- ✅ Handle reading many files through symlinks efficiently
+
+#### Stress Tests (2 tests)
+- ✅ Handle rapid file creation and symlink operations
+- ✅ Handle many sequential commits with symlinks
+
+### Node.js fs Compatibility Tests (63 tests)
+
+#### Constants (2 tests)
+- ✅ Export fs constants (F_OK, R_OK, W_OK, etc.)
+- ✅ Have constants on instance
+
+#### access() (4 tests)
+- ✅ Resolve for existing file
+- ✅ Resolve for existing directory
+- ✅ Reject for non-existent path
+- ✅ Accept mode parameter
+
+#### appendFile() (4 tests)
+- ✅ Append to existing file
+- ✅ Create file if it does not exist
+- ✅ Handle binary data
+- ✅ Append multiple times
+
+#### copyFile() (5 tests)
+- ✅ Copy file content
+- ✅ Overwrite existing file by default
+- ✅ Fail with COPYFILE_EXCL if dest exists
+- ✅ Create parent directories
+- ✅ Copy binary files
+
+#### cp() (4 tests)
+- ✅ Copy a single file
+- ✅ Fail on directory without recursive
+- ✅ Copy directory recursively
+- ✅ Respect errorOnExist option
+
+#### exists() (4 tests)
+- ✅ Return true for existing file
+- ✅ Return true for existing directory
+- ✅ Return false for non-existent path
+- ✅ Return true for root
+
+#### realpath() (3 tests)
+- ✅ Resolve regular path
+- ✅ Resolve symlink to target
+- ✅ Resolve symlink chain
+
+#### rm() (6 tests)
+- ✅ Remove a file
+- ✅ Remove a symlink
+- ✅ Fail on directory without recursive
+- ✅ Remove directory with recursive
+- ✅ Ignore non-existent path with force
+- ✅ Fail on non-existent path without force
+
+#### truncate() (3 tests)
+- ✅ Truncate file to zero
+- ✅ Truncate file to specified length
+- ✅ Fail on non-existent file
+
+#### mkdtemp() (2 tests)
+- ✅ Create unique directory
+- ✅ Create directory with prefix
+
+#### chmod() (2 tests)
+- ✅ Not throw for existing file
+- ✅ Verify path exists
+
+#### chown() (2 tests)
+- ✅ Not throw for existing file
+- ✅ Verify path exists
+
+#### utimes() / lutimes() (4 tests)
+- ✅ Not throw for existing file
+- ✅ Verify path exists
+- ✅ Not throw for existing symlink
+- ✅ Verify symlink path exists
+
+#### open() (8 tests)
+- ✅ Open file for reading
+- ✅ Open file for writing
+- ✅ Support readFile on handle
+- ✅ Support writeFile on handle
+- ✅ Support stat on handle
+- ✅ Support truncate on handle
+- ✅ Truncate file when opened with w flag
+- ✅ Append when opened with a flag
+
+#### opendir() (3 tests)
+- ✅ Open directory for iteration
+- ✅ Support async iteration
+- ✅ Have path property
+
+#### createReadStream() (2 tests)
+- ✅ Create readable stream
+- ✅ Support start and end options
+
+#### createWriteStream() (1 test)
+- ✅ Create writable stream
+
+#### watch() (2 tests)
+- ✅ Return watcher object
+- ✅ Support abort signal
+
+#### Performance with new methods (2 tests)
+- ✅ Copy many files efficiently
+- ✅ Append many times efficiently
 
 ## Test Files Structure
 
@@ -200,7 +318,8 @@ test/
 ├── opfs.test.js            # Core functionality tests (53)
 ├── symlink.test.js         # Symlink feature tests (36)
 ├── performance.test.js     # Performance benchmarks (11)
-└── git-integration.test.js # Git compatibility tests (13)
+├── git-integration.test.js # Git compatibility tests (25)
+└── fs-compat.test.js       # Node.js fs compatibility tests (63)
 ```
 
 ## Mock Implementation
@@ -277,6 +396,16 @@ npm test -- --reporter=verbose
 - Reading git trees
 - Handling symlinks in git operations
 - Performance with git workflows
+
+### ✅ Node.js fs Compatibility
+- access(), appendFile(), copyFile(), cp()
+- exists(), realpath(), rm(), truncate()
+- mkdtemp(), chmod(), chown(), utimes(), lutimes()
+- open() with FileHandle API
+- opendir() with directory iteration
+- createReadStream(), createWriteStream()
+- watch() for file changes
+- fs constants export
 
 ## Continuous Integration
 

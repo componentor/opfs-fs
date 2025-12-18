@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import OPFS from '../index.js'
+import OPFS from '../dist/index.js'
 
 describe('Performance Benchmarks', () => {
-  let fs
+  let fs: OPFS
 
   beforeEach(() => {
     resetFileSystem()
@@ -54,7 +54,7 @@ describe('Performance Benchmarks', () => {
       console.log(`1MB file write: ${writeDuration.toFixed(2)}ms`)
 
       const readStart = performance.now()
-      const readData = await fs.readFile('/large.bin')
+      const readData = await fs.readFile('/large.bin') as Uint8Array
       const readDuration = performance.now() - readStart
       console.log(`1MB file read: ${readDuration.toFixed(2)}ms`)
 

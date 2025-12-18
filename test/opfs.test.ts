@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import OPFS from '../index.js'
+import OPFS from '../dist/index.js'
+import type { Dirent } from '../dist/index.js'
 
 describe('OPFS Core Functionality', () => {
-  let fs
+  let fs: OPFS
 
   beforeEach(() => {
     resetFileSystem()
@@ -52,7 +53,7 @@ describe('OPFS Core Functionality', () => {
     it('should handle large files', async () => {
       const largeData = new Uint8Array(10000).fill(42)
       await fs.writeFile('/large.bin', largeData)
-      const content = await fs.readFile('/large.bin')
+      const content = await fs.readFile('/large.bin') as Uint8Array
       expect(content.length).toBe(10000)
       expect(content[0]).toBe(42)
       expect(content[9999]).toBe(42)
@@ -210,13 +211,13 @@ describe('OPFS Core Functionality', () => {
       await fs.writeFile('/file.txt', 'content')
       await fs.mkdir('/dir')
 
-      const entries = await fs.readdir('/', { withFileTypes: true })
+      const entries = await fs.readdir('/', { withFileTypes: true }) as Dirent[]
 
-      const file = entries.find(e => e.name === 'file.txt')
+      const file = entries.find(e => e.name === 'file.txt')!
       expect(file.isFile()).toBe(true)
       expect(file.isDirectory()).toBe(false)
 
-      const dir = entries.find(e => e.name === 'dir')
+      const dir = entries.find(e => e.name === 'dir')!
       expect(dir.isFile()).toBe(false)
       expect(dir.isDirectory()).toBe(true)
     })
