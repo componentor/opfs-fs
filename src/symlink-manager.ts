@@ -12,39 +12,78 @@ const MAX_SYMLINK_DEPTH = 10
 export class SymlinkManager {
   private cache: SymlinkCache | null = null
   private cacheCount = 0 // Track count to avoid Object.keys() calls
+  private resolvedCache: Map<string, string> = new Map() // Cache resolved paths
   private dirty = false
   private handleManager: HandleManager
   private useSync: boolean
+  private loadPromise: Promise<SymlinkCache> | null = null // Avoid multiple concurrent loads
+  private diskLoaded = false // Track if we've loaded from disk
 
   constructor(handleManager: HandleManager, useSync: boolean) {
     this.handleManager = handleManager
     this.useSync = useSync
+    // Initialize with empty cache - most operations won't need symlinks
+    this.cache = {}
+    this.cacheCount = 0
+  }
+
+  /**
+   * Reset all symlink state (called when root directory is cleared)
+   */
+  reset(): void {
+    this.cache = {}
+    this.cacheCount = 0
+    this.resolvedCache.clear()
+    this.dirty = false
+    this.loadPromise = null
+    this.diskLoaded = false
   }
 
   /**
    * Load symlinks from metadata file
+   * Uses loadPromise to avoid multiple concurrent disk reads
    */
   async load(): Promise<SymlinkCache> {
-    if (this.cache !== null) return this.cache
+    // Fast path: if we've already loaded from disk, use cached data
+    if (this.diskLoaded) return this.cache!
 
+    // If there's already a load in progress, wait for it
+    if (this.loadPromise) return this.loadPromise
+
+    // Load from disk
+    this.loadPromise = this.loadFromDisk()
+    const result = await this.loadPromise
+    this.loadPromise = null
+    return result
+  }
+
+  /**
+   * Actually read from disk
+   */
+  private async loadFromDisk(): Promise<SymlinkCache> {
     try {
       const { fileHandle } = await this.handleManager.getHandle(SYMLINK_FILE)
       if (!fileHandle) {
-        this.cache = {}
-        this.cacheCount = 0
-        return this.cache
+        // No symlink file exists - keep empty cache
+        this.diskLoaded = true
+        return this.cache!
       }
 
       const file = await fileHandle.getFile()
       const text = await file.text()
       this.cache = JSON.parse(text)
       this.cacheCount = Object.keys(this.cache).length
+      this.diskLoaded = true
     } catch {
-      this.cache = {}
-      this.cacheCount = 0
+      // Error reading - keep empty cache
+      if (!this.cache) {
+        this.cache = {}
+        this.cacheCount = 0
+      }
+      this.diskLoaded = true
     }
 
-    return this.cache
+    return this.cache!
   }
 
   /**
@@ -90,27 +129,32 @@ export class SymlinkManager {
   /**
    * Resolve a path through symlinks
    * Fast synchronous path when cache is already loaded
+   * Uses resolved cache for O(1) repeated lookups
+   *
+   * OPTIMIZATION: If we haven't loaded from disk yet AND no symlinks have been
+   * created in this session, we skip the disk check entirely. This makes pure
+   * file operations (no symlinks) very fast.
    */
   async resolve(path: string, maxDepth = MAX_SYMLINK_DEPTH): Promise<string> {
-    // Fast path: if cache is loaded and empty, return path directly (O(1) check)
-    if (this.cache !== null) {
-      // Skip resolution entirely if no symlinks exist (common case)
-      if (this.cacheCount === 0) {
-        return path
-      }
-      return this.resolveSync(path, this.cache, maxDepth)
-    }
-
-    const symlinks = await this.load()
-    // Skip resolution entirely if no symlinks exist (common case)
+    // Ultra-fast path: if no symlinks exist in memory, return immediately
+    // This covers both: (1) fresh session with no symlinks, (2) loaded from disk with no symlinks
     if (this.cacheCount === 0) {
+      // If we've loaded from disk and it's empty, we're done
+      // If we haven't loaded from disk, assume no symlinks until a symlink op is called
       return path
     }
-    return this.resolveSync(path, symlinks, maxDepth)
+
+    // We have symlinks in memory - resolve them
+    // Check resolved cache first for instant lookup
+    const cached = this.resolvedCache.get(path)
+    if (cached !== undefined) {
+      return cached
+    }
+    return this.resolveSync(path, this.cache!, maxDepth)
   }
 
   /**
-   * Synchronous resolution helper
+   * Synchronous resolution helper - caches the result
    */
   private resolveSync(path: string, symlinks: SymlinkCache, maxDepth: number): string {
     let currentPath = path
@@ -125,7 +169,19 @@ export class SymlinkManager {
       throw createELOOP(path)
     }
 
+    // Cache the resolved path if it was actually a symlink
+    if (currentPath !== path) {
+      this.resolvedCache.set(path, currentPath)
+    }
+
     return currentPath
+  }
+
+  /**
+   * Clear the resolved path cache (called when symlinks change)
+   */
+  private clearResolvedCache(): void {
+    this.resolvedCache.clear()
   }
 
   /**
@@ -167,6 +223,7 @@ export class SymlinkManager {
 
     symlinks[normalizedPath] = normalizedTarget
     this.cacheCount++
+    this.clearResolvedCache() // Invalidate resolved cache
     this.dirty = true
     await this.flush()
   }
@@ -194,6 +251,7 @@ export class SymlinkManager {
     }
 
     this.cacheCount += links.length
+    this.clearResolvedCache() // Invalidate resolved cache
     this.dirty = true
     await this.flush()
   }
@@ -207,6 +265,7 @@ export class SymlinkManager {
     if (symlinks[path]) {
       delete symlinks[path]
       this.cacheCount--
+      this.clearResolvedCache() // Invalidate resolved cache
       this.dirty = true
       await this.flush()
       return true
@@ -225,6 +284,7 @@ export class SymlinkManager {
       const target = symlinks[oldPath]
       delete symlinks[oldPath]
       symlinks[newPath] = target
+      this.clearResolvedCache() // Invalidate resolved cache
       this.dirty = true
       await this.flush()
       return true

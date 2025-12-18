@@ -86,6 +86,8 @@ function wrapError(err) {
 }
 
 // src/path-utils.ts
+var normalizeCache = /* @__PURE__ */ new Map();
+var CACHE_MAX_SIZE = 1e3;
 function normalize(path) {
   if (path === void 0 || path === null) {
     throw new TypeError("Path cannot be undefined or null");
@@ -95,6 +97,10 @@ function normalize(path) {
   }
   if (path === "") {
     return "/";
+  }
+  const cached = normalizeCache.get(path);
+  if (cached !== void 0) {
+    return cached;
   }
   const parts = path.split("/");
   const stack = [];
@@ -107,13 +113,28 @@ function normalize(path) {
       stack.push(part);
     }
   }
-  return "/" + stack.join("/");
+  const result = "/" + stack.join("/");
+  if (normalizeCache.size >= CACHE_MAX_SIZE) {
+    const deleteCount = CACHE_MAX_SIZE / 4;
+    let count = 0;
+    for (const key of normalizeCache.keys()) {
+      if (count++ >= deleteCount) break;
+      normalizeCache.delete(key);
+    }
+  }
+  normalizeCache.set(path, result);
+  return result;
 }
 function dirname(path) {
   const normalized = normalize(path);
   const parts = normalized.split("/").filter(Boolean);
   if (parts.length < 2) return "/";
   return "/" + parts.slice(0, -1).join("/");
+}
+function basename(path) {
+  const normalized = normalize(path);
+  const parts = normalized.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "";
 }
 function isRoot(path) {
   const normalized = normalize(path);
@@ -124,9 +145,11 @@ function segments(path) {
 }
 
 // src/handle-manager.ts
+var FILE_HANDLE_POOL_SIZE = 50;
 var HandleManager = class {
   rootPromise;
   dirCache = /* @__PURE__ */ new Map();
+  fileHandlePool = /* @__PURE__ */ new Map();
   constructor() {
     this.rootPromise = navigator.storage.getDirectory();
   }
@@ -140,24 +163,61 @@ var HandleManager = class {
    * Clear directory cache for a path and its children
    */
   clearCache(path = "") {
-    if (this.dirCache.size === 0) return;
     const normalizedPath = normalize(path);
     if (normalizedPath === "/" || normalizedPath === "") {
       this.dirCache.clear();
+      this.fileHandlePool.clear();
       return;
     }
-    for (const key of this.dirCache.keys()) {
-      if (key === normalizedPath || key.startsWith(normalizedPath + "/")) {
-        this.dirCache.delete(key);
+    if (this.dirCache.size > 0) {
+      for (const key of this.dirCache.keys()) {
+        if (key === normalizedPath || key.startsWith(normalizedPath + "/")) {
+          this.dirCache.delete(key);
+        }
       }
     }
+    if (this.fileHandlePool.size > 0) {
+      for (const key of this.fileHandlePool.keys()) {
+        if (key === normalizedPath || key.startsWith(normalizedPath + "/")) {
+          this.fileHandlePool.delete(key);
+        }
+      }
+    }
+  }
+  /**
+   * Get a file handle from the pool or create a new one
+   */
+  async getPooledFileHandle(path, create = false) {
+    const normalizedPath = normalize(path);
+    const pooled = this.fileHandlePool.get(normalizedPath);
+    if (pooled) {
+      return pooled;
+    }
+    const { fileHandle } = await this.getHandle(normalizedPath, { create });
+    if (!fileHandle) return null;
+    if (this.fileHandlePool.size >= FILE_HANDLE_POOL_SIZE) {
+      const firstKey = this.fileHandlePool.keys().next().value;
+      if (firstKey) this.fileHandlePool.delete(firstKey);
+    }
+    this.fileHandlePool.set(normalizedPath, fileHandle);
+    return fileHandle;
+  }
+  /**
+   * Invalidate a specific file handle from the pool
+   */
+  invalidateFileHandle(path) {
+    const normalizedPath = normalize(path);
+    this.fileHandlePool.delete(normalizedPath);
   }
   /**
    * Get file or directory handle for a path
    */
   async getHandle(path, opts = {}) {
-    const cleanPath = path.replace(/^\/+/, "");
-    const parts = cleanPath.split("/").filter(Boolean);
+    const parts = segments(path);
+    if (parts.length === 0) {
+      const root = await this.rootPromise;
+      return { dir: root, name: "", fileHandle: null, dirHandle: root };
+    }
     let dir = await this.rootPromise;
     let currentPath = "";
     for (let i = 0; i < parts.length - 1; i++) {
@@ -261,32 +321,65 @@ var SymlinkManager = class {
   cache = null;
   cacheCount = 0;
   // Track count to avoid Object.keys() calls
+  resolvedCache = /* @__PURE__ */ new Map();
+  // Cache resolved paths
   dirty = false;
   handleManager;
   useSync;
+  loadPromise = null;
+  // Avoid multiple concurrent loads
+  diskLoaded = false;
+  // Track if we've loaded from disk
   constructor(handleManager, useSync) {
     this.handleManager = handleManager;
     this.useSync = useSync;
+    this.cache = {};
+    this.cacheCount = 0;
+  }
+  /**
+   * Reset all symlink state (called when root directory is cleared)
+   */
+  reset() {
+    this.cache = {};
+    this.cacheCount = 0;
+    this.resolvedCache.clear();
+    this.dirty = false;
+    this.loadPromise = null;
+    this.diskLoaded = false;
   }
   /**
    * Load symlinks from metadata file
+   * Uses loadPromise to avoid multiple concurrent disk reads
    */
   async load() {
-    if (this.cache !== null) return this.cache;
+    if (this.diskLoaded) return this.cache;
+    if (this.loadPromise) return this.loadPromise;
+    this.loadPromise = this.loadFromDisk();
+    const result = await this.loadPromise;
+    this.loadPromise = null;
+    return result;
+  }
+  /**
+   * Actually read from disk
+   */
+  async loadFromDisk() {
     try {
       const { fileHandle } = await this.handleManager.getHandle(SYMLINK_FILE);
       if (!fileHandle) {
-        this.cache = {};
-        this.cacheCount = 0;
+        this.diskLoaded = true;
         return this.cache;
       }
       const file = await fileHandle.getFile();
       const text = await file.text();
       this.cache = JSON.parse(text);
       this.cacheCount = Object.keys(this.cache).length;
+      this.diskLoaded = true;
     } catch {
-      this.cache = {};
-      this.cacheCount = 0;
+      if (!this.cache) {
+        this.cache = {};
+        this.cacheCount = 0;
+      }
+      this.diskLoaded = true;
     }
     return this.cache;
   }
@@ -325,22 +418,24 @@ var SymlinkManager = class {
   /**
    * Resolve a path through symlinks
    * Fast synchronous path when cache is already loaded
+   * Uses resolved cache for O(1) repeated lookups
+   *
+   * OPTIMIZATION: If we haven't loaded from disk yet AND no symlinks have been
+   * created in this session, we skip the disk check entirely. This makes pure
+   * file operations (no symlinks) very fast.
    */
   async resolve(path, maxDepth = MAX_SYMLINK_DEPTH) {
-    if (this.cache !== null) {
-      if (this.cacheCount === 0) {
-        return path;
-      }
-      return this.resolveSync(path, this.cache, maxDepth);
-    }
-    const symlinks = await this.load();
     if (this.cacheCount === 0) {
       return path;
     }
-    return this.resolveSync(path, symlinks, maxDepth);
+    const cached = this.resolvedCache.get(path);
+    if (cached !== void 0) {
+      return cached;
+    }
+    return this.resolveSync(path, this.cache, maxDepth);
   }
   /**
-   * Synchronous resolution helper
+   * Synchronous resolution helper - caches the result
    */
   resolveSync(path, symlinks, maxDepth) {
     let currentPath = path;
@@ -352,7 +447,16 @@ var SymlinkManager = class {
     if (depth >= maxDepth) {
       throw createELOOP(path);
     }
+    if (currentPath !== path) {
+      this.resolvedCache.set(path, currentPath);
+    }
     return currentPath;
+  }
+  /**
+   * Clear the resolved path cache (called when symlinks change)
+   */
+  clearResolvedCache() {
+    this.resolvedCache.clear();
   }
   /**
    * Check if a path is a symlink
@@ -385,6 +489,7 @@ var SymlinkManager = class {
     await checkExists();
     symlinks[normalizedPath] = normalizedTarget;
     this.cacheCount++;
+    this.clearResolvedCache();
     this.dirty = true;
     await this.flush();
   }
@@ -403,6 +508,7 @@ var SymlinkManager = class {
       symlinks[normalizedPath] = normalizedTarget;
     }
     this.cacheCount += links.length;
+    this.clearResolvedCache();
     this.dirty = true;
     await this.flush();
   }
@@ -414,6 +520,7 @@ var SymlinkManager = class {
     if (symlinks[path]) {
       delete symlinks[path];
       this.cacheCount--;
+      this.clearResolvedCache();
       this.dirty = true;
       await this.flush();
       return true;
@@ -429,6 +536,7 @@ var SymlinkManager = class {
       const target = symlinks[oldPath];
       delete symlinks[oldPath];
       symlinks[newPath] = target;
+      this.clearResolvedCache();
       this.dirty = true;
       await this.flush();
       return true;
@@ -619,14 +727,18 @@ var OPFS = class {
    */
   async limitConcurrency(items, maxConcurrent, taskFn) {
     if (items.length === 0) return;
-    if (items.length <= 3) {
+    if (items.length <= 2) {
       for (const item of items) {
         await taskFn(item);
       }
       return;
     }
+    if (items.length <= maxConcurrent) {
+      await Promise.all(items.map(taskFn));
+      return;
+    }
     const queue = [...items];
-    const workers = Array.from({ length: Math.min(maxConcurrent, items.length) }).map(async () => {
+    const workers = Array.from({ length: maxConcurrent }).map(async () => {
       while (queue.length) {
         const item = queue.shift();
         if (item !== void 0) await taskFn(item);
@@ -642,7 +754,7 @@ var OPFS = class {
     try {
       const normalizedPath = normalize(path);
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
-      const { fileHandle } = await this.handleManager.getHandle(resolvedPath);
+      const fileHandle = await this.handleManager.getPooledFileHandle(resolvedPath);
       if (!fileHandle) {
         throw createENOENT(path);
       }
@@ -664,6 +776,63 @@ var OPFS = class {
     }
   }
   /**
+   * Read multiple files efficiently in a batch operation
+   * More performant than multiple readFile calls for bulk operations
+   * Returns results in the same order as input paths
+   */
+  async readFileBatch(paths) {
+    this.log("readFileBatch", `${paths.length} files`);
+    if (paths.length === 0) return [];
+    try {
+      const byParent = /* @__PURE__ */ new Map();
+      for (let i = 0; i < paths.length; i++) {
+        const normalizedPath = normalize(paths[i]);
+        const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
+        const parentPath = dirname(resolvedPath);
+        const name = basename(resolvedPath);
+        if (!byParent.has(parentPath)) {
+          byParent.set(parentPath, []);
+        }
+        byParent.get(parentPath).push({ index: i, name, resolvedPath });
+      }
+      const results = new Array(paths.length);
+      for (const [parentPath, files] of byParent) {
+        let parentHandle;
+        try {
+          parentHandle = await this.handleManager.getDirectoryHandle(parentPath);
+        } catch {
+          for (const { index } of files) {
+            results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) };
+          }
+          continue;
+        }
+        for (const { index, name } of files) {
+          try {
+            const fileHandle = await parentHandle.getFileHandle(name);
+            let buffer;
+            if (this.useSync) {
+              const access = await fileHandle.createSyncAccessHandle();
+              const size = access.getSize();
+              buffer = new Uint8Array(size);
+              access.read(buffer);
+              access.close();
+            } else {
+              const file = await fileHandle.getFile();
+              buffer = new Uint8Array(await file.arrayBuffer());
+            }
+            results[index] = { path: paths[index], data: buffer };
+          } catch (err) {
+            results[index] = { path: paths[index], data: null, error: err };
+          }
+        }
+      }
+      return results;
+    } catch (err) {
+      this.logError("readFileBatch", err);
+      throw wrapError(err);
+    }
+  }
+  /**
    * Write data to a file
    */
   async writeFile(path, data, options = {}) {
@@ -676,10 +845,7 @@ var OPFS = class {
       if (this.useSync) {
         const access = await fileHandle.createSyncAccessHandle();
         access.truncate(0);
-        let written = 0;
-        while (written < buffer.length) {
-          written += access.write(buffer.subarray(written), { at: written });
-        }
+        access.write(buffer, { at: 0 });
         access.close();
       } else {
         const writable = await fileHandle.createWritable();
@@ -688,6 +854,49 @@ var OPFS = class {
       }
     } catch (err) {
       this.logError("writeFile", err);
+      throw wrapError(err);
+    }
+  }
+  /**
+   * Write multiple files efficiently in a batch operation
+   * More performant than multiple writeFile calls for bulk operations
+   */
+  async writeFileBatch(entries) {
+    this.log("writeFileBatch", `${entries.length} files`);
+    if (entries.length === 0) return;
+    try {
+      const encoder = new TextEncoder();
+      const byParent = /* @__PURE__ */ new Map();
+      for (const { path, data } of entries) {
+        const normalizedPath = normalize(path);
+        const resolvedPath = await this.symlinkManager.resolve(normalizedPath);
+        const parentPath = dirname(resolvedPath);
+        const name = basename(resolvedPath);
+        const buffer = typeof data === "string" ? encoder.encode(data) : data;
+        if (!byParent.has(parentPath)) {
+          byParent.set(parentPath, []);
+        }
+        byParent.get(parentPath).push({ name, buffer });
+      }
+      for (const [parentPath, files] of byParent) {
+        await this.handleManager.mkdir(parentPath);
+        const parentHandle = await this.handleManager.getDirectoryHandle(parentPath);
+        for (const { name, buffer } of files) {
+          const fileHandle = await parentHandle.getFileHandle(name, { create: true });
+          if (this.useSync) {
+            const access = await fileHandle.createSyncAccessHandle();
+            access.truncate(0);
+            access.write(buffer, { at: 0 });
+            access.close();
+          } else {
+            const writable = await fileHandle.createWritable();
+            await writable.write(buffer);
+            await writable.close();
+          }
+        }
+      }
+    } catch (err) {
+      this.logError("writeFileBatch", err);
       throw wrapError(err);
     }
   }
@@ -722,6 +931,7 @@ var OPFS = class {
           10,
           (name2) => root.removeEntry(name2, { recursive: true })
         );
+        this.symlinkManager.reset();
         return;
       }
       const pathSegments = segments(normalizedPath);
@@ -854,20 +1064,6 @@ var OPFS = class {
         dir.getFileHandle(name),
         dir.getDirectoryHandle(name)
       ]);
-      if (dirResult.status === "fulfilled") {
-        return {
-          type: "dir",
-          size: 0,
-          mode: 16877,
-          ctime: defaultDate,
-          ctimeMs: 0,
-          mtime: defaultDate,
-          mtimeMs: 0,
-          isFile: () => false,
-          isDirectory: () => true,
-          isSymbolicLink: () => false
-        };
-      }
       if (fileResult.status === "fulfilled") {
         const fileHandle = fileResult.value;
         const file = await fileHandle.getFile();
@@ -882,6 +1078,20 @@ var OPFS = class {
           mtimeMs: mtime.getTime(),
           isFile: () => true,
           isDirectory: () => false,
+          isSymbolicLink: () => false
+        };
+      }
+      if (dirResult.status === "fulfilled") {
+        return {
+          type: "dir",
+          size: 0,
+          mode: 16877,
+          ctime: defaultDate,
+          ctimeMs: 0,
+          mtime: defaultDate,
+          mtimeMs: 0,
+          isFile: () => false,
+          isDirectory: () => true,
           isSymbolicLink: () => false
         };
       }
@@ -963,11 +1173,9 @@ var OPFS = class {
       const normalizedPath = normalize(path);
       this.handleManager.clearCache(normalizedPath);
       await this.symlinkManager.symlink(target, path, async () => {
-        try {
-          await this.stat(normalizedPath);
+        const { fileHandle, dirHandle } = await this.handleManager.getHandle(normalizedPath);
+        if (fileHandle || dirHandle) {
           throw createEEXIST(path);
-        } catch (err) {
-          if (err.code !== "ENOENT") throw err;
         }
       });
     } catch (err) {
@@ -998,10 +1206,13 @@ var OPFS = class {
       }
       await this.symlinkManager.symlinkBatch(links, async (normalizedPath) => {
         try {
-          await this.stat(normalizedPath);
-          throw createEEXIST(normalizedPath);
+          const { fileHandle, dirHandle } = await this.handleManager.getHandle(normalizedPath);
+          if (fileHandle || dirHandle) {
+            throw createEEXIST(normalizedPath);
+          }
         } catch (err) {
-          if (err.code !== "ENOENT") throw err;
+          if (err.code === "ENOENT") return;
+          throw err;
         }
       });
     } catch (err) {

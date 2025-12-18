@@ -45,6 +45,26 @@ interface WriteFileOptions {
     encoding?: string;
 }
 /**
+ * Entry for batch file write operation
+ */
+interface BatchWriteEntry {
+    /** File path to write */
+    path: string;
+    /** Data to write (string or binary) */
+    data: string | Uint8Array;
+}
+/**
+ * Result entry for batch file read operation
+ */
+interface BatchReadResult {
+    /** File path */
+    path: string;
+    /** File data (null if file doesn't exist or error occurred) */
+    data: Uint8Array | null;
+    /** Error if read failed */
+    error?: Error;
+}
+/**
  * Options for readdir operation
  */
 interface ReaddirOptions {
@@ -271,9 +291,20 @@ declare class OPFS {
      */
     readFile(path: string, options?: ReadFileOptions): Promise<string | Uint8Array>;
     /**
+     * Read multiple files efficiently in a batch operation
+     * More performant than multiple readFile calls for bulk operations
+     * Returns results in the same order as input paths
+     */
+    readFileBatch(paths: string[]): Promise<BatchReadResult[]>;
+    /**
      * Write data to a file
      */
     writeFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void>;
+    /**
+     * Write multiple files efficiently in a batch operation
+     * More performant than multiple writeFile calls for bulk operations
+     */
+    writeFileBatch(entries: BatchWriteEntry[]): Promise<void>;
     /**
      * Create a directory
      */
@@ -402,4 +433,4 @@ declare class OPFS {
     statfs(path?: string): Promise<StatFs>;
 }
 
-export { type CpOptions, type Dir, type Dirent, type DiskUsage, type FSConstants, type FSWatcher, type FileHandle, type OPFSOptions, type ReadFileOptions, type ReadResult, type ReadStreamOptions, type ReaddirOptions, type RmOptions, type StatFs, type Stats, type SymlinkCache, type SymlinkDefinition, type WatchCallback, type WatchEvent, type WatchOptions, type WatchRegistration, type WriteFileOptions, type WriteResult, type WriteStreamOptions, constants, OPFS as default };
+export { type BatchReadResult, type BatchWriteEntry, type CpOptions, type Dir, type Dirent, type DiskUsage, type FSConstants, type FSWatcher, type FileHandle, type OPFSOptions, type ReadFileOptions, type ReadResult, type ReadStreamOptions, type ReaddirOptions, type RmOptions, type StatFs, type Stats, type SymlinkCache, type SymlinkDefinition, type WatchCallback, type WatchEvent, type WatchOptions, type WatchRegistration, type WriteFileOptions, type WriteResult, type WriteStreamOptions, constants, OPFS as default };

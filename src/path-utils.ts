@@ -1,5 +1,10 @@
+// Path normalization cache - LRU-style with max size
+const normalizeCache = new Map<string, string>()
+const CACHE_MAX_SIZE = 1000
+
 /**
  * Normalize a path, handling . and .. components
+ * Results are cached for performance on repeated calls
  */
 export function normalize(path: string | undefined | null): string {
   if (path === undefined || path === null) {
@@ -12,6 +17,12 @@ export function normalize(path: string | undefined | null): string {
 
   if (path === '') {
     return '/'
+  }
+
+  // Check cache first
+  const cached = normalizeCache.get(path)
+  if (cached !== undefined) {
+    return cached
   }
 
   const parts = path.split('/')
@@ -27,7 +38,21 @@ export function normalize(path: string | undefined | null): string {
     }
   }
 
-  return '/' + stack.join('/')
+  const result = '/' + stack.join('/')
+
+  // Cache the result (simple LRU: clear when full)
+  if (normalizeCache.size >= CACHE_MAX_SIZE) {
+    // Delete oldest entries (first 25%)
+    const deleteCount = CACHE_MAX_SIZE / 4
+    let count = 0
+    for (const key of normalizeCache.keys()) {
+      if (count++ >= deleteCount) break
+      normalizeCache.delete(key)
+    }
+  }
+  normalizeCache.set(path, result)
+
+  return result
 }
 
 /**

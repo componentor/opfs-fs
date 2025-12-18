@@ -78,6 +78,46 @@ describe('Performance Benchmarks', () => {
       expect(duration).toBeLessThan(5000)
     })
 
+    it('should handle batch writes efficiently', async () => {
+      const entries = Array.from({ length: 100 }, (_, i) => ({
+        path: `/batch/file${i}.txt`,
+        data: `batch content ${i}`
+      }))
+
+      const start = performance.now()
+      await fs.writeFileBatch(entries)
+      const duration = performance.now() - start
+      console.log(`100 batch writes: ${duration.toFixed(2)}ms (${(duration/100).toFixed(2)}ms per file)`)
+
+      // Verify files were written
+      const data = await fs.readFile('/batch/file50.txt', { encoding: 'utf-8' })
+      expect(data).toBe('batch content 50')
+      expect(duration).toBeLessThan(5000)
+    })
+
+    it('should handle batch reads efficiently', async () => {
+      // Setup - write files first
+      const entries = Array.from({ length: 100 }, (_, i) => ({
+        path: `/batchread/file${i}.txt`,
+        data: `batch read content ${i}`
+      }))
+      await fs.writeFileBatch(entries)
+
+      const paths = entries.map(e => e.path)
+
+      const start = performance.now()
+      const results = await fs.readFileBatch(paths)
+      const duration = performance.now() - start
+      console.log(`100 batch reads: ${duration.toFixed(2)}ms (${(duration/100).toFixed(2)}ms per file)`)
+
+      // Verify files were read correctly
+      expect(results.length).toBe(100)
+      expect(results[50].data).not.toBeNull()
+      const decoder = new TextDecoder()
+      expect(decoder.decode(results[50].data!)).toBe('batch read content 50')
+      expect(duration).toBeLessThan(5000)
+    })
+
     it('should handle concurrent reads', async () => {
       // Setup
       for (let i = 0; i < 50; i++) {

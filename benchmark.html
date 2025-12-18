@@ -110,6 +110,18 @@
       <span class="benchmark-name">10MB file streaming read (64KB chunks)</span>
       <span class="benchmark-result pending" id="stream-read">--</span>
     </div>
+    <div class="benchmark">
+      <span class="benchmark-name">100 batch writes (writeFileBatch)</span>
+      <span class="benchmark-result pending" id="batch-writes">--</span>
+    </div>
+    <div class="benchmark">
+      <span class="benchmark-name">100 batch reads (readFileBatch)</span>
+      <span class="benchmark-result pending" id="batch-reads">--</span>
+    </div>
+    <div class="benchmark">
+      <span class="benchmark-name">100 repeated reads (pooled handles)</span>
+      <span class="benchmark-result pending" id="pooled-reads">--</span>
+    </div>
   </div>
 
   <div class="card">
@@ -254,6 +266,32 @@
           const { done, value } = await reader.read();
           if (done) break;
           totalBytes += value.length;
+        }
+      });
+
+      // Batch writes - uses writeFileBatch for optimal performance
+      const batchEntries = [];
+      for (let i = 0; i < 100; i++) {
+        batchEntries.push({ path: `/bench/batch/file${i}.txt`, data: `batch content ${i}` });
+      }
+
+      await runBenchmark('100 batch writes (writeFileBatch)', 'batch-writes', async () => {
+        await fs.writeFileBatch(batchEntries);
+      });
+
+      // Batch reads - uses readFileBatch for optimal performance
+      const batchReadPaths = batchEntries.map(e => e.path);
+
+      await runBenchmark('100 batch reads (readFileBatch)', 'batch-reads', async () => {
+        await fs.readFileBatch(batchReadPaths);
+      });
+
+      // Pooled reads - tests file handle pooling
+      await fs.writeFile('/bench/pooled.txt', 'pooled content for repeated reads');
+
+      await runBenchmark('100 repeated reads (pooled handles)', 'pooled-reads', async () => {
+        for (let i = 0; i < 100; i++) {
+          await fs.readFile('/bench/pooled.txt', { encoding: 'utf-8' });
         }
       });
 

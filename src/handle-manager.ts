@@ -13,12 +13,15 @@ export interface GetHandleOptions {
   kind?: 'file' | 'directory'
 }
 
+const FILE_HANDLE_POOL_SIZE = 50
+
 /**
  * Manages OPFS handles with caching for improved performance
  */
 export class HandleManager {
   private rootPromise: Promise<FileSystemDirectoryHandle>
   private dirCache: Map<string, FileSystemDirectoryHandle> = new Map()
+  private fileHandlePool: Map<string, FileSystemFileHandle> = new Map()
 
   constructor() {
     this.rootPromise = navigator.storage.getDirectory()
@@ -35,31 +38,82 @@ export class HandleManager {
    * Clear directory cache for a path and its children
    */
   clearCache(path = ''): void {
-    // Early exit if cache is empty
-    if (this.dirCache.size === 0) return
-
     const normalizedPath = normalize(path)
 
     // For root path, just clear everything
     if (normalizedPath === '/' || normalizedPath === '') {
       this.dirCache.clear()
+      this.fileHandlePool.clear()
       return
     }
 
-    // Only iterate if there might be something to delete
-    for (const key of this.dirCache.keys()) {
-      if (key === normalizedPath || key.startsWith(normalizedPath + '/')) {
-        this.dirCache.delete(key)
+    // Clear directory cache
+    if (this.dirCache.size > 0) {
+      for (const key of this.dirCache.keys()) {
+        if (key === normalizedPath || key.startsWith(normalizedPath + '/')) {
+          this.dirCache.delete(key)
+        }
       }
     }
+
+    // Clear file handle pool for affected paths
+    if (this.fileHandlePool.size > 0) {
+      for (const key of this.fileHandlePool.keys()) {
+        if (key === normalizedPath || key.startsWith(normalizedPath + '/')) {
+          this.fileHandlePool.delete(key)
+        }
+      }
+    }
+  }
+
+  /**
+   * Get a file handle from the pool or create a new one
+   */
+  async getPooledFileHandle(path: string, create = false): Promise<FileSystemFileHandle | null> {
+    const normalizedPath = normalize(path)
+
+    // Check pool first
+    const pooled = this.fileHandlePool.get(normalizedPath)
+    if (pooled) {
+      return pooled
+    }
+
+    // Get handle the normal way
+    const { fileHandle } = await this.getHandle(normalizedPath, { create })
+    if (!fileHandle) return null
+
+    // Add to pool with LRU eviction
+    if (this.fileHandlePool.size >= FILE_HANDLE_POOL_SIZE) {
+      // Delete oldest entry (first key in Map maintains insertion order)
+      const firstKey = this.fileHandlePool.keys().next().value
+      if (firstKey) this.fileHandlePool.delete(firstKey)
+    }
+    this.fileHandlePool.set(normalizedPath, fileHandle)
+
+    return fileHandle
+  }
+
+  /**
+   * Invalidate a specific file handle from the pool
+   */
+  invalidateFileHandle(path: string): void {
+    const normalizedPath = normalize(path)
+    this.fileHandlePool.delete(normalizedPath)
   }
 
   /**
    * Get file or directory handle for a path
    */
   async getHandle(path: string, opts: GetHandleOptions = {}): Promise<HandleResult> {
-    const cleanPath = path.replace(/^\/+/, '')
-    const parts = cleanPath.split('/').filter(Boolean)
+    // Use segments() for optimized path parsing (leverages normalize cache)
+    const parts = segments(path)
+
+    // Handle root or empty path
+    if (parts.length === 0) {
+      const root = await this.rootPromise
+      return { dir: root, name: '', fileHandle: null, dirHandle: root }
+    }
+
     let dir = await this.rootPromise
     let currentPath = ''
 

@@ -2,6 +2,8 @@ import type {
   OPFSOptions,
   ReadFileOptions,
   WriteFileOptions,
+  BatchWriteEntry,
+  BatchReadResult,
   ReaddirOptions,
   Dirent,
   Stats,
@@ -78,16 +80,24 @@ export default class OPFS {
   ): Promise<void> {
     if (items.length === 0) return
 
-    // For small batches, just run sequentially to avoid Promise overhead
-    if (items.length <= 3) {
+    // For very small batches, run sequentially (minimal overhead)
+    if (items.length <= 2) {
       for (const item of items) {
         await taskFn(item)
       }
       return
     }
 
+    // For medium batches up to maxConcurrent, use Promise.all for true parallelism
+    // This is optimal for browser where I/O can truly run in parallel
+    if (items.length <= maxConcurrent) {
+      await Promise.all(items.map(taskFn))
+      return
+    }
+
+    // For large batches, use worker pool pattern to limit concurrency
     const queue = [...items]
-    const workers = Array.from({ length: Math.min(maxConcurrent, items.length) }).map(async () => {
+    const workers = Array.from({ length: maxConcurrent }).map(async () => {
       while (queue.length) {
         const item = queue.shift()
         if (item !== undefined) await taskFn(item)
@@ -104,7 +114,9 @@ export default class OPFS {
     try {
       const normalizedPath = normalize(path)
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
-      const { fileHandle } = await this.handleManager.getHandle(resolvedPath)
+
+      // Use pooled file handle for faster repeated access
+      const fileHandle = await this.handleManager.getPooledFileHandle(resolvedPath)
 
       if (!fileHandle) {
         throw createENOENT(path)
@@ -133,6 +145,78 @@ export default class OPFS {
   }
 
   /**
+   * Read multiple files efficiently in a batch operation
+   * More performant than multiple readFile calls for bulk operations
+   * Returns results in the same order as input paths
+   */
+  async readFileBatch(paths: string[]): Promise<BatchReadResult[]> {
+    this.log('readFileBatch', `${paths.length} files`)
+    if (paths.length === 0) return []
+
+    try {
+      // Group paths by parent directory to optimize handle reuse
+      const byParent = new Map<string, Array<{ index: number; name: string; resolvedPath: string }>>()
+
+      for (let i = 0; i < paths.length; i++) {
+        const normalizedPath = normalize(paths[i])
+        const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
+        const parentPath = dirname(resolvedPath)
+        const name = basename(resolvedPath)
+
+        if (!byParent.has(parentPath)) {
+          byParent.set(parentPath, [])
+        }
+        byParent.get(parentPath)!.push({ index: i, name, resolvedPath })
+      }
+
+      // Pre-allocate results array
+      const results: BatchReadResult[] = new Array(paths.length)
+
+      // Process each directory group
+      for (const [parentPath, files] of byParent) {
+        let parentHandle: FileSystemDirectoryHandle
+        try {
+          parentHandle = await this.handleManager.getDirectoryHandle(parentPath)
+        } catch {
+          // Parent doesn't exist - mark all files in this group as not found
+          for (const { index } of files) {
+            results[index] = { path: paths[index], data: null, error: createENOENT(paths[index]) }
+          }
+          continue
+        }
+
+        // Read all files in this directory
+        for (const { index, name } of files) {
+          try {
+            const fileHandle = await parentHandle.getFileHandle(name)
+            let buffer: Uint8Array
+
+            if (this.useSync) {
+              const access = await fileHandle.createSyncAccessHandle()
+              const size = access.getSize()
+              buffer = new Uint8Array(size)
+              access.read(buffer)
+              access.close()
+            } else {
+              const file = await fileHandle.getFile()
+              buffer = new Uint8Array(await file.arrayBuffer())
+            }
+
+            results[index] = { path: paths[index], data: buffer }
+          } catch (err) {
+            results[index] = { path: paths[index], data: null, error: err as Error }
+          }
+        }
+      }
+
+      return results
+    } catch (err) {
+      this.logError('readFileBatch', err)
+      throw wrapError(err)
+    }
+  }
+
+  /**
    * Write data to a file
    */
   async writeFile(path: string, data: string | Uint8Array, options: WriteFileOptions = {}): Promise<void> {
@@ -140,7 +224,6 @@ export default class OPFS {
     try {
       const normalizedPath = normalize(path)
       const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
-      // Note: No clearCache needed here - cache only stores directory handles, not files
 
       const { fileHandle } = await this.handleManager.getHandle(resolvedPath, { create: true })
       const buffer = typeof data === 'string' ? new TextEncoder().encode(data) : data
@@ -148,10 +231,7 @@ export default class OPFS {
       if (this.useSync) {
         const access = await fileHandle!.createSyncAccessHandle()
         access.truncate(0)
-        let written = 0
-        while (written < buffer.length) {
-          written += access.write(buffer.subarray(written), { at: written })
-        }
+        access.write(buffer, { at: 0 })
         access.close()
       } else {
         const writable = await fileHandle!.createWritable()
@@ -160,6 +240,62 @@ export default class OPFS {
       }
     } catch (err) {
       this.logError('writeFile', err)
+      throw wrapError(err)
+    }
+  }
+
+  /**
+   * Write multiple files efficiently in a batch operation
+   * More performant than multiple writeFile calls for bulk operations
+   */
+  async writeFileBatch(entries: BatchWriteEntry[]): Promise<void> {
+    this.log('writeFileBatch', `${entries.length} files`)
+    if (entries.length === 0) return
+
+    try {
+      // Reuse encoder for all string conversions
+      const encoder = new TextEncoder()
+
+      // Group entries by parent directory to optimize handle reuse
+      const byParent = new Map<string, Array<{ name: string; buffer: Uint8Array }>>()
+
+      for (const { path, data } of entries) {
+        const normalizedPath = normalize(path)
+        const resolvedPath = await this.symlinkManager.resolve(normalizedPath)
+        const parentPath = dirname(resolvedPath)
+        const name = basename(resolvedPath)
+        const buffer = typeof data === 'string' ? encoder.encode(data) : data
+
+        if (!byParent.has(parentPath)) {
+          byParent.set(parentPath, [])
+        }
+        byParent.get(parentPath)!.push({ name, buffer })
+      }
+
+      // Process each directory group sequentially (avoids concurrency overhead)
+      for (const [parentPath, files] of byParent) {
+        // Ensure parent directory exists once for the group
+        await this.handleManager.mkdir(parentPath)
+        const parentHandle = await this.handleManager.getDirectoryHandle(parentPath)
+
+        // Write all files in this directory
+        for (const { name, buffer } of files) {
+          const fileHandle = await parentHandle.getFileHandle(name, { create: true })
+
+          if (this.useSync) {
+            const access = await fileHandle.createSyncAccessHandle()
+            access.truncate(0)
+            access.write(buffer, { at: 0 })
+            access.close()
+          } else {
+            const writable = await fileHandle.createWritable()
+            await writable.write(buffer)
+            await writable.close()
+          }
+        }
+      }
+    } catch (err) {
+      this.logError('writeFileBatch', err)
       throw wrapError(err)
     }
   }
@@ -195,6 +331,8 @@ export default class OPFS {
         await this.limitConcurrency(entries, 10, (name) =>
           root.removeEntry(name, { recursive: true })
         )
+        // Reset symlink manager state since all files including metadata are gone
+        this.symlinkManager.reset()
         return
       }
 
@@ -348,25 +486,11 @@ export default class OPFS {
         }
       }
 
+      // Check both file and directory in parallel for best performance
       const [fileResult, dirResult] = await Promise.allSettled([
         dir.getFileHandle(name),
         dir.getDirectoryHandle(name)
       ])
-
-      if (dirResult.status === 'fulfilled') {
-        return {
-          type: 'dir',
-          size: 0,
-          mode: 0o040755,
-          ctime: defaultDate,
-          ctimeMs: 0,
-          mtime: defaultDate,
-          mtimeMs: 0,
-          isFile: () => false,
-          isDirectory: () => true,
-          isSymbolicLink: () => false
-        }
-      }
 
       if (fileResult.status === 'fulfilled') {
         const fileHandle = fileResult.value
@@ -383,6 +507,21 @@ export default class OPFS {
           mtimeMs: mtime.getTime(),
           isFile: () => true,
           isDirectory: () => false,
+          isSymbolicLink: () => false
+        }
+      }
+
+      if (dirResult.status === 'fulfilled') {
+        return {
+          type: 'dir',
+          size: 0,
+          mode: 0o040755,
+          ctime: defaultDate,
+          ctimeMs: 0,
+          mtime: defaultDate,
+          mtimeMs: 0,
+          isFile: () => false,
+          isDirectory: () => true,
           isSymbolicLink: () => false
         }
       }
@@ -474,12 +613,11 @@ export default class OPFS {
       const normalizedPath = normalize(path)
       this.handleManager.clearCache(normalizedPath)
 
+      // Fast existence check - just try to get handle, much faster than full stat()
       await this.symlinkManager.symlink(target, path, async () => {
-        try {
-          await this.stat(normalizedPath)
+        const { fileHandle, dirHandle } = await this.handleManager.getHandle(normalizedPath)
+        if (fileHandle || dirHandle) {
           throw createEEXIST(path)
-        } catch (err) {
-          if ((err as { code?: string }).code !== 'ENOENT') throw err
         }
       })
     } catch (err) {
@@ -507,16 +645,22 @@ export default class OPFS {
   async symlinkBatch(links: SymlinkDefinition[]): Promise<void> {
     this.log('symlinkBatch', links.length, 'links')
     try {
+      // Clear cache once at the start for all paths
       for (const { path } of links) {
         this.handleManager.clearCache(normalize(path))
       }
 
+      // Fast existence check - if parent doesn't exist, symlink path is available
       await this.symlinkManager.symlinkBatch(links, async (normalizedPath) => {
         try {
-          await this.stat(normalizedPath)
-          throw createEEXIST(normalizedPath)
+          const { fileHandle, dirHandle } = await this.handleManager.getHandle(normalizedPath)
+          if (fileHandle || dirHandle) {
+            throw createEEXIST(normalizedPath)
+          }
         } catch (err) {
-          if ((err as { code?: string }).code !== 'ENOENT') throw err
+          // If ENOENT (parent doesn't exist), the path is available for symlink
+          if ((err as { code?: string }).code === 'ENOENT') return
+          throw err
         }
       })
     } catch (err) {

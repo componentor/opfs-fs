@@ -49,6 +49,28 @@ export interface WriteFileOptions {
 }
 
 /**
+ * Entry for batch file write operation
+ */
+export interface BatchWriteEntry {
+  /** File path to write */
+  path: string
+  /** Data to write (string or binary) */
+  data: string | Uint8Array
+}
+
+/**
+ * Result entry for batch file read operation
+ */
+export interface BatchReadResult {
+  /** File path */
+  path: string
+  /** File data (null if file doesn't exist or error occurred) */
+  data: Uint8Array | null
+  /** Error if read failed */
+  error?: Error
+}
+
+/**
  * Options for readdir operation
  */
 export interface ReaddirOptions {
