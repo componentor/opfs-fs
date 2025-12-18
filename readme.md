@@ -1,8 +1,8 @@
-# @componentor/opfs-fs
+# @componentor/fs
 
 > 🚀 A blazing-fast, Node.js-compatible filesystem interface for the browser using the Origin Private File System API
 
-[![npm version](https://badge.fury.io/js/@componentor%2Fopfs-fs.svg)](https://www.npmjs.com/package/@componentor/opfs-fs)
+[![npm version](https://badge.fury.io/js/@componentor%2Ffs.svg)](https://www.npmjs.com/package/@componentor/fs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## ✨ Features
@@ -20,21 +20,21 @@
 ## 🚀 Installation
 
 ```bash
-npm install @componentor/opfs-fs
+npm install @componentor/fs
 ```
 
 ```bash
-yarn add @componentor/opfs-fs
+yarn add @componentor/fs
 ```
 
 ```bash
-pnpm add @componentor/opfs-fs
+pnpm add @componentor/fs
 ```
 
 ## 🔧 Quick Start
 
 ```javascript
-import OPFS from '@componentor/opfs-fs'
+import OPFS from '@componentor/fs'
 
 const fs = new OPFS()
 
@@ -53,7 +53,7 @@ const files = await fs.readdir('.')
 console.log(files) // ['hello.txt', 'projects']
 ```
 
-## 💡 Why OPFS-FS is Fast
+## 💡 Why It's Fast
 
 The Origin Private File System API provides **direct access to the device's storage** with significantly better performance characteristics than traditional browser storage solutions:
 
@@ -71,6 +71,8 @@ The Origin Private File System API provides **direct access to the device's stor
 | Small Files | ~50ms | ~20ms | **~5ms** |
 | Large Files | Memory limited | ~100ms | **~15ms** |
 | Directory Ops | Not supported | Complex | **Native** |
+
+> **Note:** This package was previously published as `@componentor/opfs-fs`. If you're upgrading, simply change your imports from `@componentor/opfs-fs` to `@componentor/fs`.
 
 ## 📚 API Reference
 
@@ -112,11 +114,11 @@ Hybrid mode provides the **best performance** by routing operations to optimal b
 - **Writes on worker**: Sync access handles are faster
 
 ```javascript
-import OPFS from '@componentor/opfs-fs'
+import OPFS from '@componentor/fs'
 
 // Create with hybrid mode
 const fs = new OPFS({
-  workerUrl: new URL('@componentor/opfs-fs/worker-script', import.meta.url)
+  workerUrl: new URL('@componentor/fs/worker-script', import.meta.url)
 })
 
 // Wait for worker to be ready
@@ -554,11 +556,11 @@ fs.resetCache()
 
 ```javascript
 import git from 'isomorphic-git'
-import OPFS from '@componentor/opfs-fs'
+import OPFS from '@componentor/fs'
 
 // Use hybrid mode for best performance with git operations
 const fs = new OPFS({
-  workerUrl: new URL('@componentor/opfs-fs/worker-script', import.meta.url)
+  workerUrl: new URL('@componentor/fs/worker-script', import.meta.url)
 })
 await fs.ready()
 
@@ -581,7 +583,7 @@ fs.terminate()
 ### Building a Code Editor
 
 ```javascript
-import OPFS from '@componentor/opfs-fs'
+import OPFS from '@componentor/fs'
 
 class CodeEditor {
   constructor(workerUrl) {
@@ -624,7 +626,7 @@ class CodeEditor {
 ### File Upload Handler
 
 ```javascript
-import OPFS from '@componentor/opfs-fs'
+import OPFS from '@componentor/fs'
 
 const fs = new OPFS()
 
@@ -647,7 +649,7 @@ async function handleFileUpload(file) {
 
 ## 🌐 Browser Support
 
-OPFS-FS requires browsers that support the Origin Private File System API:
+@componentor/fs requires browsers that support the Origin Private File System API:
 
 - ✅ Chrome 86+
 - ✅ Edge 86+
@@ -690,7 +692,7 @@ try {
 
 ## 🧪 Testing
 
-OPFS-FS comes with a comprehensive test suite covering all functionality:
+@componentor/fs comes with a comprehensive test suite covering all functionality:
 
 ```bash
 # Run all tests
