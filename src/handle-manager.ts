@@ -14,6 +14,7 @@ export interface GetHandleOptions {
 }
 
 const FILE_HANDLE_POOL_SIZE = 50
+const DIR_CACHE_MAX_SIZE = 200
 
 /**
  * Manages OPFS handles with caching for improved performance
@@ -32,6 +33,18 @@ export class HandleManager {
    */
   async getRoot(): Promise<FileSystemDirectoryHandle> {
     return this.rootPromise
+  }
+
+  /**
+   * Cache a directory handle with LRU eviction
+   */
+  private cacheDirHandle(path: string, handle: FileSystemDirectoryHandle): void {
+    if (this.dirCache.size >= DIR_CACHE_MAX_SIZE) {
+      // Delete oldest entry (first key in Map maintains insertion order)
+      const firstKey = this.dirCache.keys().next().value
+      if (firstKey) this.dirCache.delete(firstKey)
+    }
+    this.dirCache.set(path, handle)
   }
 
   /**
@@ -129,7 +142,7 @@ export class HandleManager {
 
       try {
         dir = await dir.getDirectoryHandle(parts[i], { create: opts.create })
-        this.dirCache.set(currentPath, dir)
+        this.cacheDirHandle(currentPath, dir)
       } catch {
         throw createENOENT(path)
       }
@@ -181,7 +194,7 @@ export class HandleManager {
       }
 
       dir = await dir.getDirectoryHandle(part)
-      this.dirCache.set(currentPath, dir)
+      this.cacheDirHandle(currentPath, dir)
     }
 
     return dir
@@ -208,7 +221,7 @@ export class HandleManager {
       }
 
       dir = await dir.getDirectoryHandle(part, { create: true })
-      this.dirCache.set(currentPath, dir)
+      this.cacheDirHandle(currentPath, dir)
     }
   }
 
@@ -230,7 +243,7 @@ export class HandleManager {
         dir = this.dirCache.get(subPath)!
       } else {
         dir = await dir.getDirectoryHandle(part, { create: true })
-        this.dirCache.set(subPath, dir)
+        this.cacheDirHandle(subPath, dir)
       }
     }
   }

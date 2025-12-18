@@ -264,8 +264,94 @@ interface WatchRegistration {
  */
 declare const constants: FSConstants;
 
+type Backend = 'main' | 'worker';
+interface OPFSHybridOptions {
+    /** Backend for read operations (default: 'main') */
+    read?: Backend;
+    /** Backend for write operations (default: 'worker') */
+    write?: Backend;
+    /** Worker URL (required if using worker backend) */
+    workerUrl?: URL | string;
+    /** Enable verbose logging */
+    verbose?: boolean;
+}
+/**
+ * Hybrid OPFS implementation that routes operations to optimal backends
+ */
+declare class OPFSHybrid {
+    private mainFs;
+    private workerFs;
+    private readBackend;
+    private writeBackend;
+    private workerUrl?;
+    private workerReady;
+    private verbose;
+    constructor(options?: OPFSHybridOptions);
+    /**
+     * Wait for all backends to be ready
+     */
+    ready(): Promise<void>;
+    /**
+     * Terminate worker if active
+     */
+    terminate(): void;
+    private getReadFs;
+    private getWriteFs;
+    readFile(path: string, options?: ReadFileOptions): Promise<Uint8Array | string>;
+    readFileBatch(paths: string[]): Promise<BatchReadResult[]>;
+    readdir(path: string, options?: ReaddirOptions): Promise<string[] | Dirent[]>;
+    stat(path: string): Promise<Stats>;
+    lstat(path: string): Promise<Stats>;
+    exists(path: string): Promise<boolean>;
+    access(path: string, mode?: number): Promise<void>;
+    readlink(path: string): Promise<string>;
+    realpath(path: string): Promise<string>;
+    statfs(path?: string): Promise<StatFs>;
+    du(path: string): Promise<DiskUsage>;
+    writeFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void>;
+    writeFileBatch(entries: BatchWriteEntry[]): Promise<void>;
+    appendFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void>;
+    mkdir(path: string): Promise<void>;
+    rmdir(path: string): Promise<void>;
+    unlink(path: string): Promise<void>;
+    truncate(path: string, len?: number): Promise<void>;
+    symlink(target: string, path: string): Promise<void>;
+    symlinkBatch(symlinks: SymlinkDefinition[]): Promise<void>;
+    rename(oldPath: string, newPath: string): Promise<void>;
+    copyFile(src: string, dest: string, mode?: number): Promise<void>;
+    cp(src: string, dest: string, options?: CpOptions): Promise<void>;
+    rm(path: string, options?: RmOptions): Promise<void>;
+    chmod(path: string, mode: number): Promise<void>;
+    chown(path: string, uid: number, gid: number): Promise<void>;
+    utimes(path: string, atime: Date | number, mtime: Date | number): Promise<void>;
+    lutimes(path: string, atime: Date | number, mtime: Date | number): Promise<void>;
+    mkdtemp(prefix: string): Promise<string>;
+    /**
+     * Reset internal caches on both backends
+     */
+    resetCache(): Promise<void>;
+    /**
+     * Force full garbage collection on both backends
+     * More aggressive than resetCache() - reinitializes the worker's OPFS instance
+     */
+    gc(): Promise<void>;
+}
+
+/** Extended options that include hybrid mode support */
+interface OPFSExtendedOptions extends OPFSOptions {
+    /** Worker script URL - when provided, enables hybrid mode (reads on main, writes on worker) */
+    workerUrl?: URL | string;
+    /** Override read backend when using hybrid mode (default: 'main') */
+    read?: Backend;
+    /** Override write backend when using hybrid mode (default: 'worker') */
+    write?: Backend;
+}
 /**
  * OPFS-based filesystem implementation compatible with Node.js fs/promises API
+ *
+ * When `workerUrl` is provided, automatically uses hybrid mode for optimal performance:
+ * - Reads on main thread (no message passing overhead)
+ * - Writes on worker (sync access handles are faster)
  */
 declare class OPFS {
     private useSync;
@@ -274,9 +360,19 @@ declare class OPFS {
     private symlinkManager;
     private watchCallbacks;
     private tmpCounter;
+    /** Hybrid instance when workerUrl is provided */
+    private hybrid;
     /** File system constants */
     readonly constants: FSConstants;
-    constructor(options?: OPFSOptions);
+    constructor(options?: OPFSExtendedOptions);
+    /**
+     * Wait for the filesystem to be ready (only needed for hybrid mode)
+     */
+    ready(): Promise<void>;
+    /**
+     * Terminate any background workers (only needed for hybrid mode)
+     */
+    terminate(): void;
     private log;
     private logError;
     /**
@@ -431,6 +527,17 @@ declare class OPFS {
      * Note: Values are estimates for the entire origin, not per-path
      */
     statfs(path?: string): Promise<StatFs>;
+    /**
+     * Reset internal symlink cache
+     * Useful when external processes modify the filesystem
+     */
+    resetCache(): void;
+    /**
+     * Force full garbage collection
+     * Releases all handles and caches, reinitializes the worker in hybrid mode
+     * Use this for long-running operations to prevent memory leaks
+     */
+    gc(): Promise<void>;
 }
 
-export { type BatchReadResult, type BatchWriteEntry, type CpOptions, type Dir, type Dirent, type DiskUsage, type FSConstants, type FSWatcher, type FileHandle, type OPFSOptions, type ReadFileOptions, type ReadResult, type ReadStreamOptions, type ReaddirOptions, type RmOptions, type StatFs, type Stats, type SymlinkCache, type SymlinkDefinition, type WatchCallback, type WatchEvent, type WatchOptions, type WatchRegistration, type WriteFileOptions, type WriteResult, type WriteStreamOptions, constants, OPFS as default };
+export { type Backend, type BatchReadResult, type BatchWriteEntry, type CpOptions, type Dir, type Dirent, type DiskUsage, type FSConstants, type FSWatcher, type FileHandle, type OPFSExtendedOptions, OPFSHybrid, type OPFSHybridOptions, type OPFSOptions, type ReadFileOptions, type ReadResult, type ReadStreamOptions, type ReaddirOptions, type RmOptions, type StatFs, type Stats, type SymlinkCache, type SymlinkDefinition, type WatchCallback, type WatchEvent, type WatchOptions, type WatchRegistration, type WriteFileOptions, type WriteResult, type WriteStreamOptions, constants, OPFS as default };

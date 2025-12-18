@@ -10,6 +10,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/opfs-worker-proxy.d.ts",
+      "import": "./dist/opfs-worker-proxy.js"
+    },
+    "./worker-script": {
+      "import": "./dist/opfs-worker.js"
+    },
+    "./hybrid": {
+      "types": "./dist/opfs-hybrid.d.ts",
+      "import": "./dist/opfs-hybrid.js"
     }
   },
   "files": [

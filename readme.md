@@ -13,8 +13,9 @@
 - ⚡ **Isomorphic Git Ready** - Perfect companion for browser-based Git operations
 - 🔗 **Symlink Support** - Full symbolic link emulation for advanced file operations
 - 📦 **Zero Dependencies** - Lightweight and efficient
-- ✅ **Fully Tested** - 188 comprehensive tests with 100% pass rate
+- ✅ **Fully Tested** - 199 comprehensive tests with 100% pass rate
 - 📁 **Full fs Compatibility** - access, appendFile, copyFile, cp, rm, truncate, open, opendir, streams, and more
+- 🚀 **Hybrid Mode** - Optimal performance with reads on main thread and writes on worker
 
 ## 🚀 Installation
 
@@ -81,15 +82,63 @@ Creates a new OPFS filesystem instance.
 
 **Parameters:**
 - `options.useSync` (boolean, default: `true`) - Use synchronous access handles when available
+- `options.workerUrl` (URL | string, optional) - Worker script URL. When provided, enables **hybrid mode** for optimal performance
+- `options.read` ('main' | 'worker', default: 'main') - Backend for read operations in hybrid mode
+- `options.write` ('main' | 'worker', default: 'worker') - Backend for write operations in hybrid mode
+- `options.verbose` (boolean, default: `false`) - Enable verbose logging
 
 **Example:**
 ```javascript
-// Use sync handles (recommended)
+// Use sync handles (recommended for workers)
 const fs = new OPFS({ useSync: true })
 
 // Force async mode
 const fsAsync = new OPFS({ useSync: false })
+
+// Use hybrid mode (recommended for main thread - best performance!)
+const fs = new OPFS({
+  workerUrl: new URL('./opfs-worker.js', import.meta.url)
+})
+await fs.ready() // Wait for worker to initialize
+
+// Don't forget to terminate when done
+fs.terminate()
 ```
+
+### Hybrid Mode (Recommended)
+
+Hybrid mode provides the **best performance** by routing operations to optimal backends:
+- **Reads on main thread**: No message passing overhead
+- **Writes on worker**: Sync access handles are faster
+
+```javascript
+import OPFS from '@componentor/opfs-fs'
+
+// Create with hybrid mode
+const fs = new OPFS({
+  workerUrl: new URL('@componentor/opfs-fs/worker-script', import.meta.url)
+})
+
+// Wait for worker to be ready
+await fs.ready()
+
+// Use like normal - hybrid routing happens automatically
+await fs.writeFile('test.txt', 'Hello World') // Routed to worker
+const data = await fs.readFile('test.txt')     // Routed to main thread
+
+// For long-running apps, periodically call gc() to prevent memory leaks
+await fs.gc()
+
+// Clean up when done
+fs.terminate()
+```
+
+**Performance comparison** (100 iterations benchmark):
+| Mode | Average Time |
+|------|-------------|
+| Main Thread | ~335ms |
+| Worker Only | ~274ms |
+| **Hybrid** | **~262ms** |
 
 ### File Operations
 
@@ -469,7 +518,11 @@ The following methods are implemented for API compatibility but are no-ops since
 import git from 'isomorphic-git'
 import OPFS from '@componentor/opfs-fs'
 
-const fs = new OPFS()
+// Use hybrid mode for best performance with git operations
+const fs = new OPFS({
+  workerUrl: new URL('@componentor/opfs-fs/worker-script', import.meta.url)
+})
+await fs.ready()
 
 // Clone a repository
 await git.clone({
@@ -482,6 +535,9 @@ await git.clone({
 // Read a file from the repo
 const readme = await fs.readFile('/my-repo/README.md', { encoding: 'utf8' })
 console.log(readme)
+
+// Clean up when done
+fs.terminate()
 ```
 
 ### Building a Code Editor
@@ -490,8 +546,17 @@ console.log(readme)
 import OPFS from '@componentor/opfs-fs'
 
 class CodeEditor {
-  constructor() {
-    this.fs = new OPFS()
+  constructor(workerUrl) {
+    // Use hybrid mode for optimal performance
+    this.fs = new OPFS({ workerUrl })
+  }
+
+  async init() {
+    await this.fs.ready()
+  }
+
+  destroy() {
+    this.fs.terminate()
   }
 
   async createProject(name) {
@@ -598,7 +663,7 @@ npm run test:watch
 ```
 
 **Test Coverage:**
-- ✅ 188 tests with 100% pass rate
+- ✅ 199 tests with 100% pass rate
 - ✅ File read/write operations (text and binary)
 - ✅ Directory operations (create, remove, list)
 - ✅ File metadata and statistics

@@ -28,12 +28,28 @@ import { HandleManager } from './handle-manager.js'
 import { SymlinkManager } from './symlink-manager.js'
 import { createFileHandle } from './file-handle.js'
 import { createReadStream, createWriteStream } from './streams.js'
+import { OPFSHybrid, type OPFSHybridOptions, type Backend } from './opfs-hybrid.js'
 
 export { constants }
 export * from './types.js'
+export { OPFSHybrid, type OPFSHybridOptions, type Backend }
+
+/** Extended options that include hybrid mode support */
+export interface OPFSExtendedOptions extends OPFSOptions {
+  /** Worker script URL - when provided, enables hybrid mode (reads on main, writes on worker) */
+  workerUrl?: URL | string
+  /** Override read backend when using hybrid mode (default: 'main') */
+  read?: Backend
+  /** Override write backend when using hybrid mode (default: 'worker') */
+  write?: Backend
+}
 
 /**
  * OPFS-based filesystem implementation compatible with Node.js fs/promises API
+ *
+ * When `workerUrl` is provided, automatically uses hybrid mode for optimal performance:
+ * - Reads on main thread (no message passing overhead)
+ * - Writes on worker (sync access handles are faster)
  */
 export default class OPFS {
   private useSync: boolean
@@ -43,16 +59,52 @@ export default class OPFS {
   private watchCallbacks: Map<symbol, WatchRegistration> = new Map()
   private tmpCounter = 0
 
+  /** Hybrid instance when workerUrl is provided */
+  private hybrid: OPFSHybrid | null = null
+
   /** File system constants */
   public readonly constants = constants
 
-  constructor(options: OPFSOptions = {}) {
-    const { useSync = true, verbose = false } = options
-    this.useSync = useSync && typeof FileSystemFileHandle !== 'undefined' &&
-      'createSyncAccessHandle' in FileSystemFileHandle.prototype
+  constructor(options: OPFSExtendedOptions = {}) {
+    const { useSync = true, verbose = false, workerUrl, read, write } = options
     this.verbose = verbose
-    this.handleManager = new HandleManager()
-    this.symlinkManager = new SymlinkManager(this.handleManager, this.useSync)
+
+    // If workerUrl is provided, use hybrid mode
+    if (workerUrl) {
+      this.hybrid = new OPFSHybrid({
+        workerUrl,
+        read: read ?? 'main',
+        write: write ?? 'worker',
+        verbose
+      })
+      // These won't be used in hybrid mode but need to be initialized
+      this.useSync = false
+      this.handleManager = new HandleManager()
+      this.symlinkManager = new SymlinkManager(this.handleManager, false)
+    } else {
+      this.useSync = useSync && typeof FileSystemFileHandle !== 'undefined' &&
+        'createSyncAccessHandle' in FileSystemFileHandle.prototype
+      this.handleManager = new HandleManager()
+      this.symlinkManager = new SymlinkManager(this.handleManager, this.useSync)
+    }
+  }
+
+  /**
+   * Wait for the filesystem to be ready (only needed for hybrid mode)
+   */
+  async ready(): Promise<void> {
+    if (this.hybrid) {
+      await this.hybrid.ready()
+    }
+  }
+
+  /**
+   * Terminate any background workers (only needed for hybrid mode)
+   */
+  terminate(): void {
+    if (this.hybrid) {
+      this.hybrid.terminate()
+    }
   }
 
   private log(method: string, ...args: unknown[]): void {
@@ -110,6 +162,10 @@ export default class OPFS {
    * Read file contents
    */
   async readFile(path: string, options: ReadFileOptions = {}): Promise<string | Uint8Array> {
+    if (this.hybrid) {
+      return this.hybrid.readFile(path, options)
+    }
+
     this.log('readFile', path, options)
     try {
       const normalizedPath = normalize(path)
@@ -150,6 +206,10 @@ export default class OPFS {
    * Returns results in the same order as input paths
    */
   async readFileBatch(paths: string[]): Promise<BatchReadResult[]> {
+    if (this.hybrid) {
+      return this.hybrid.readFileBatch(paths)
+    }
+
     this.log('readFileBatch', `${paths.length} files`)
     if (paths.length === 0) return []
 
@@ -220,6 +280,10 @@ export default class OPFS {
    * Write data to a file
    */
   async writeFile(path: string, data: string | Uint8Array, options: WriteFileOptions = {}): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.writeFile(path, data, options)
+    }
+
     this.log('writeFile', path)
     try {
       const normalizedPath = normalize(path)
@@ -249,6 +313,10 @@ export default class OPFS {
    * More performant than multiple writeFile calls for bulk operations
    */
   async writeFileBatch(entries: BatchWriteEntry[]): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.writeFileBatch(entries)
+    }
+
     this.log('writeFileBatch', `${entries.length} files`)
     if (entries.length === 0) return
 
@@ -304,6 +372,10 @@ export default class OPFS {
    * Create a directory
    */
   async mkdir(path: string): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.mkdir(path)
+    }
+
     this.log('mkdir', path)
     try {
       await this.handleManager.mkdir(path)
@@ -317,6 +389,10 @@ export default class OPFS {
    * Remove a directory
    */
   async rmdir(path: string): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.rmdir(path)
+    }
+
     this.log('rmdir', path)
     try {
       const normalizedPath = normalize(path)
@@ -359,6 +435,10 @@ export default class OPFS {
    * Remove a file or symlink
    */
   async unlink(path: string): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.unlink(path)
+    }
+
     this.log('unlink', path)
     try {
       const normalizedPath = normalize(path)
@@ -388,6 +468,10 @@ export default class OPFS {
    * Read directory contents
    */
   async readdir(path: string, options?: ReaddirOptions): Promise<string[] | Dirent[]> {
+    if (this.hybrid) {
+      return this.hybrid.readdir(path, options)
+    }
+
     this.log('readdir', path, options)
     try {
       const normalizedPath = normalize(path)
@@ -453,6 +537,10 @@ export default class OPFS {
    * Get file/directory statistics (follows symlinks)
    */
   async stat(path: string): Promise<Stats> {
+    if (this.hybrid) {
+      return this.hybrid.stat(path)
+    }
+
     this.log('stat', path)
     try {
       const normalizedPath = normalize(path)
@@ -537,6 +625,10 @@ export default class OPFS {
    * Get file/directory statistics (does not follow symlinks)
    */
   async lstat(path: string): Promise<Stats> {
+    if (this.hybrid) {
+      return this.hybrid.lstat(path)
+    }
+
     this.log('lstat', path)
     try {
       const normalizedPath = normalize(path)
@@ -570,6 +662,10 @@ export default class OPFS {
    * Rename a file or directory
    */
   async rename(oldPath: string, newPath: string): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.rename(oldPath, newPath)
+    }
+
     this.log('rename', oldPath, newPath)
     try {
       const normalizedOld = normalize(oldPath)
@@ -608,6 +704,10 @@ export default class OPFS {
    * Create a symbolic link
    */
   async symlink(target: string, path: string): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.symlink(target, path)
+    }
+
     this.log('symlink', target, path)
     try {
       const normalizedPath = normalize(path)
@@ -630,6 +730,10 @@ export default class OPFS {
    * Read symlink target
    */
   async readlink(path: string): Promise<string> {
+    if (this.hybrid) {
+      return this.hybrid.readlink(path)
+    }
+
     this.log('readlink', path)
     try {
       return await this.symlinkManager.readlink(path)
@@ -643,6 +747,10 @@ export default class OPFS {
    * Create multiple symlinks efficiently
    */
   async symlinkBatch(links: SymlinkDefinition[]): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.symlinkBatch(links)
+    }
+
     this.log('symlinkBatch', links.length, 'links')
     try {
       // Clear cache once at the start for all paths
@@ -673,6 +781,10 @@ export default class OPFS {
    * Check file accessibility
    */
   async access(path: string, mode = constants.F_OK): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.access(path, mode)
+    }
+
     this.log('access', path, mode)
     try {
       const normalizedPath = normalize(path)
@@ -688,6 +800,10 @@ export default class OPFS {
    * Append data to a file
    */
   async appendFile(path: string, data: string | Uint8Array, options: WriteFileOptions = {}): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.appendFile(path, data, options)
+    }
+
     this.log('appendFile', path)
     try {
       const normalizedPath = normalize(path)
@@ -720,6 +836,10 @@ export default class OPFS {
    * Copy a file
    */
   async copyFile(src: string, dest: string, mode = 0): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.copyFile(src, dest, mode)
+    }
+
     this.log('copyFile', src, dest, mode)
     try {
       const normalizedSrc = normalize(src)
@@ -749,6 +869,10 @@ export default class OPFS {
    * Copy files/directories recursively
    */
   async cp(src: string, dest: string, options: CpOptions = {}): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.cp(src, dest, options)
+    }
+
     this.log('cp', src, dest, options)
     try {
       const normalizedSrc = normalize(src)
@@ -803,6 +927,10 @@ export default class OPFS {
    * Check if path exists
    */
   async exists(path: string): Promise<boolean> {
+    if (this.hybrid) {
+      return this.hybrid.exists(path)
+    }
+
     this.log('exists', path)
     try {
       await this.stat(normalize(path))
@@ -816,6 +944,10 @@ export default class OPFS {
    * Resolve symlinks to get real path
    */
   async realpath(path: string): Promise<string> {
+    if (this.hybrid) {
+      return this.hybrid.realpath(path)
+    }
+
     this.log('realpath', path)
     const normalizedPath = normalize(path)
     return this.symlinkManager.resolve(normalizedPath)
@@ -825,6 +957,10 @@ export default class OPFS {
    * Remove files and directories
    */
   async rm(path: string, options: RmOptions = {}): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.rm(path, options)
+    }
+
     this.log('rm', path, options)
     try {
       const normalizedPath = normalize(path)
@@ -859,6 +995,10 @@ export default class OPFS {
    * Truncate file to specified length
    */
   async truncate(path: string, len = 0): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.truncate(path, len)
+    }
+
     this.log('truncate', path, len)
     try {
       const normalizedPath = normalize(path)
@@ -899,6 +1039,10 @@ export default class OPFS {
    * Create a unique temporary directory
    */
   async mkdtemp(prefix: string): Promise<string> {
+    if (this.hybrid) {
+      return this.hybrid.mkdtemp(prefix)
+    }
+
     this.log('mkdtemp', prefix)
     try {
       const normalizedPrefix = normalize(prefix)
@@ -916,6 +1060,10 @@ export default class OPFS {
    * Change file mode (no-op for OPFS compatibility)
    */
   async chmod(path: string, mode: number): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.chmod(path, mode)
+    }
+
     this.log('chmod', path, mode)
     await this.stat(normalize(path))
     // OPFS doesn't support file modes
@@ -925,6 +1073,10 @@ export default class OPFS {
    * Change file owner (no-op for OPFS compatibility)
    */
   async chown(path: string, uid: number, gid: number): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.chown(path, uid, gid)
+    }
+
     this.log('chown', path, uid, gid)
     await this.stat(normalize(path))
     // OPFS doesn't support file ownership
@@ -934,6 +1086,10 @@ export default class OPFS {
    * Update file timestamps (no-op for OPFS compatibility)
    */
   async utimes(path: string, atime: Date | number, mtime: Date | number): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.utimes(path, atime, mtime)
+    }
+
     this.log('utimes', path, atime, mtime)
     await this.stat(normalize(path))
     // OPFS doesn't support setting timestamps
@@ -943,6 +1099,10 @@ export default class OPFS {
    * Update symlink timestamps (no-op)
    */
   async lutimes(path: string, atime: Date | number, mtime: Date | number): Promise<void> {
+    if (this.hybrid) {
+      return this.hybrid.lutimes(path, atime, mtime)
+    }
+
     this.log('lutimes', path, atime, mtime)
     await this.lstat(normalize(path))
     // OPFS doesn't support setting timestamps
@@ -1129,6 +1289,10 @@ export default class OPFS {
    * Get disk usage for a path
    */
   async du(path: string): Promise<DiskUsage> {
+    if (this.hybrid) {
+      return this.hybrid.du(path)
+    }
+
     this.log('du', path)
     const normalizedPath = normalize(path)
     const stat = await this.stat(normalizedPath)
@@ -1141,6 +1305,10 @@ export default class OPFS {
    * Note: Values are estimates for the entire origin, not per-path
    */
   async statfs(path?: string): Promise<StatFs> {
+    if (this.hybrid) {
+      return this.hybrid.statfs(path)
+    }
+
     this.log('statfs', path)
     try {
       // Verify path exists if provided
@@ -1172,5 +1340,36 @@ export default class OPFS {
       this.logError('statfs', err)
       throw wrapError(err)
     }
+  }
+
+  /**
+   * Reset internal symlink cache
+   * Useful when external processes modify the filesystem
+   */
+  resetCache(): void {
+    if (this.hybrid) {
+      // For hybrid, this is async but we provide a sync interface for compatibility
+      // Use gc() for guaranteed cleanup
+      this.hybrid.resetCache()
+      return
+    }
+
+    this.symlinkManager.reset()
+    this.handleManager.clearCache()
+  }
+
+  /**
+   * Force full garbage collection
+   * Releases all handles and caches, reinitializes the worker in hybrid mode
+   * Use this for long-running operations to prevent memory leaks
+   */
+  async gc(): Promise<void> {
+    if (this.hybrid) {
+      await this.hybrid.gc()
+      return
+    }
+
+    this.symlinkManager.reset()
+    this.handleManager.clearCache()
   }
 }

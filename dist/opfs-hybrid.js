@@ -703,426 +703,6 @@ function createWriteStream(path, options, context) {
   });
 }
 
-// src/opfs-worker-proxy.ts
-var OPFSWorker = class {
-  worker = null;
-  pendingRequests = /* @__PURE__ */ new Map();
-  nextId = 1;
-  readyPromise;
-  readyResolve;
-  /** File system constants */
-  constants = constants;
-  constructor(options = {}) {
-    this.readyPromise = new Promise((resolve) => {
-      this.readyResolve = resolve;
-    });
-    this.initWorker(options);
-  }
-  initWorker(options) {
-    const { workerUrl, workerOptions = { type: "module" } } = options;
-    if (workerUrl) {
-      this.worker = new Worker(workerUrl, workerOptions);
-    } else {
-      throw new Error(
-        'OPFSWorker requires a workerUrl option pointing to the worker script. Example: new OPFSWorker({ workerUrl: new URL("./opfs-worker.js", import.meta.url) })'
-      );
-    }
-    this.worker.onmessage = (event) => {
-      const { id, type, result, error } = event.data;
-      if (type === "ready") {
-        this.readyResolve();
-        return;
-      }
-      if (id !== void 0) {
-        const pending = this.pendingRequests.get(id);
-        if (pending) {
-          this.pendingRequests.delete(id);
-          if (error) {
-            const fsError = new FSError(error.message, error.code || "UNKNOWN");
-            pending.reject(fsError);
-          } else {
-            pending.resolve(result);
-          }
-        }
-      }
-    };
-    this.worker.onerror = (event) => {
-      console.error("[OPFSWorker] Worker error:", event);
-    };
-  }
-  /**
-   * Wait for the worker to be ready
-   */
-  async ready() {
-    return this.readyPromise;
-  }
-  /**
-   * Terminate the worker
-   */
-  terminate() {
-    if (this.worker) {
-      this.worker.terminate();
-      this.worker = null;
-      for (const [, pending] of this.pendingRequests) {
-        pending.reject(new Error("Worker terminated"));
-      }
-      this.pendingRequests.clear();
-    }
-  }
-  call(method, args, transfer) {
-    return new Promise((resolve, reject) => {
-      if (!this.worker) {
-        reject(new Error("Worker not initialized or terminated"));
-        return;
-      }
-      const id = this.nextId++;
-      this.pendingRequests.set(id, {
-        resolve,
-        reject
-      });
-      const message = { id, method, args };
-      if (transfer && transfer.length > 0) {
-        this.worker.postMessage(message, transfer);
-      } else {
-        this.worker.postMessage(message);
-      }
-    });
-  }
-  // File operations
-  async readFile(path, options) {
-    const result = await this.call("readFile", [path, options]);
-    return result;
-  }
-  async writeFile(path, data, options) {
-    const transfer = [];
-    if (data instanceof Uint8Array) {
-      transfer.push(data.buffer);
-    }
-    await this.call("writeFile", [path, data, options], transfer);
-  }
-  async readFileBatch(paths) {
-    return this.call("readFileBatch", [paths]);
-  }
-  async writeFileBatch(entries) {
-    const transfer = [];
-    for (const entry of entries) {
-      if (entry.data instanceof Uint8Array) {
-        transfer.push(entry.data.buffer);
-      }
-    }
-    await this.call("writeFileBatch", [entries], transfer);
-  }
-  async appendFile(path, data, options) {
-    const transfer = [];
-    if (data instanceof Uint8Array) {
-      transfer.push(data.buffer);
-    }
-    await this.call("appendFile", [path, data, options], transfer);
-  }
-  async copyFile(src, dest, mode) {
-    await this.call("copyFile", [src, dest, mode]);
-  }
-  async unlink(path) {
-    await this.call("unlink", [path]);
-  }
-  async truncate(path, len) {
-    await this.call("truncate", [path, len]);
-  }
-  // Directory operations
-  async mkdir(path) {
-    await this.call("mkdir", [path]);
-  }
-  async rmdir(path) {
-    await this.call("rmdir", [path]);
-  }
-  async readdir(path, options) {
-    const result = await this.call("readdir", [path, options]);
-    if (options?.withFileTypes && Array.isArray(result)) {
-      return result.map((item) => {
-        if (typeof item === "object" && "name" in item) {
-          const entry = item;
-          return {
-            name: entry.name,
-            isFile: () => entry._isFile ?? false,
-            isDirectory: () => entry._isDir ?? false,
-            isSymbolicLink: () => entry._isSymlink ?? false
-          };
-        }
-        return item;
-      });
-    }
-    return result;
-  }
-  async cp(src, dest, options) {
-    await this.call("cp", [src, dest, options]);
-  }
-  async rm(path, options) {
-    await this.call("rm", [path, options]);
-  }
-  // Stat operations
-  async stat(path) {
-    const result = await this.call("stat", [path]);
-    return this.deserializeStats(result);
-  }
-  async lstat(path) {
-    const result = await this.call("lstat", [path]);
-    return this.deserializeStats(result);
-  }
-  deserializeStats(data) {
-    const ctime = new Date(data.ctime);
-    const mtime = new Date(data.mtime);
-    return {
-      type: data.type,
-      size: data.size,
-      mode: data.mode,
-      ctime,
-      ctimeMs: data.ctimeMs,
-      mtime,
-      mtimeMs: data.mtimeMs,
-      target: data.target,
-      isFile: () => data.type === "file",
-      isDirectory: () => data.type === "dir",
-      isSymbolicLink: () => data.type === "symlink"
-    };
-  }
-  async exists(path) {
-    return this.call("exists", [path]);
-  }
-  async access(path, mode) {
-    await this.call("access", [path, mode]);
-  }
-  async statfs(path) {
-    return this.call("statfs", [path]);
-  }
-  async du(path) {
-    return this.call("du", [path]);
-  }
-  // Symlink operations
-  async symlink(target, path) {
-    await this.call("symlink", [target, path]);
-  }
-  async readlink(path) {
-    return this.call("readlink", [path]);
-  }
-  async symlinkBatch(links) {
-    await this.call("symlinkBatch", [links]);
-  }
-  async realpath(path) {
-    return this.call("realpath", [path]);
-  }
-  // Other operations
-  async rename(oldPath, newPath) {
-    await this.call("rename", [oldPath, newPath]);
-  }
-  async mkdtemp(prefix) {
-    return this.call("mkdtemp", [prefix]);
-  }
-  async chmod(path, mode) {
-    await this.call("chmod", [path, mode]);
-  }
-  async chown(path, uid, gid) {
-    await this.call("chown", [path, uid, gid]);
-  }
-  async utimes(path, atime, mtime) {
-    await this.call("utimes", [path, atime, mtime]);
-  }
-  async lutimes(path, atime, mtime) {
-    await this.call("lutimes", [path, atime, mtime]);
-  }
-  /**
-   * Reset internal caches to free memory
-   * Useful for long-running benchmarks or after bulk operations
-   */
-  async resetCache() {
-    await this.call("resetCache", []);
-  }
-  /**
-   * Force full garbage collection by reinitializing the OPFS instance in the worker
-   * This completely releases all handles and caches, preventing memory leaks in long-running operations
-   * More aggressive than resetCache() - use when resetCache() isn't sufficient
-   */
-  async gc() {
-    await this.call("gc", []);
-  }
-};
-
-// src/opfs-hybrid.ts
-var OPFSHybrid = class {
-  mainFs;
-  workerFs = null;
-  readBackend;
-  writeBackend;
-  workerUrl;
-  workerReady = null;
-  verbose;
-  constructor(options = {}) {
-    this.readBackend = options.read ?? "main";
-    this.writeBackend = options.write ?? "worker";
-    this.workerUrl = options.workerUrl;
-    this.verbose = options.verbose ?? false;
-    this.mainFs = new OPFS({ useSync: false, verbose: this.verbose });
-    if (this.readBackend === "worker" || this.writeBackend === "worker") {
-      if (!this.workerUrl) {
-        throw new Error("workerUrl is required when using worker backend");
-      }
-      this.workerFs = new OPFSWorker({ workerUrl: this.workerUrl });
-      this.workerReady = this.workerFs.ready();
-    }
-  }
-  /**
-   * Wait for all backends to be ready
-   */
-  async ready() {
-    if (this.workerReady) {
-      await this.workerReady;
-    }
-  }
-  /**
-   * Terminate worker if active
-   */
-  terminate() {
-    if (this.workerFs) {
-      this.workerFs.terminate();
-      this.workerFs = null;
-    }
-  }
-  getReadFs() {
-    if (this.readBackend === "worker" && this.workerFs) {
-      return this.workerFs;
-    }
-    return this.mainFs;
-  }
-  getWriteFs() {
-    if (this.writeBackend === "worker" && this.workerFs) {
-      return this.workerFs;
-    }
-    return this.mainFs;
-  }
-  // ============ Read Operations ============
-  async readFile(path, options) {
-    return this.getReadFs().readFile(path, options);
-  }
-  async readFileBatch(paths) {
-    return this.getReadFs().readFileBatch(paths);
-  }
-  async readdir(path, options) {
-    return this.getReadFs().readdir(path, options);
-  }
-  async stat(path) {
-    return this.getReadFs().stat(path);
-  }
-  async lstat(path) {
-    return this.getReadFs().lstat(path);
-  }
-  async exists(path) {
-    return this.getReadFs().exists(path);
-  }
-  async access(path, mode) {
-    return this.getReadFs().access(path, mode);
-  }
-  async readlink(path) {
-    return this.getReadFs().readlink(path);
-  }
-  async realpath(path) {
-    return this.getReadFs().realpath(path);
-  }
-  async statfs(path) {
-    return this.getReadFs().statfs(path);
-  }
-  async du(path) {
-    return this.getReadFs().du(path);
-  }
-  // ============ Write Operations ============
-  async writeFile(path, data, options) {
-    return this.getWriteFs().writeFile(path, data, options);
-  }
-  async writeFileBatch(entries) {
-    return this.getWriteFs().writeFileBatch(entries);
-  }
-  async appendFile(path, data, options) {
-    return this.getWriteFs().appendFile(path, data, options);
-  }
-  async mkdir(path) {
-    return this.getWriteFs().mkdir(path);
-  }
-  async rmdir(path) {
-    if (this.readBackend !== this.writeBackend && this.workerFs) {
-      await this.workerFs.rmdir(path);
-      this.mainFs.resetCache();
-    } else {
-      return this.getWriteFs().rmdir(path);
-    }
-  }
-  async unlink(path) {
-    return this.getWriteFs().unlink(path);
-  }
-  async truncate(path, len) {
-    return this.getWriteFs().truncate(path, len);
-  }
-  async symlink(target, path) {
-    if (this.readBackend !== this.writeBackend && this.workerFs) {
-      await this.workerFs.symlink(target, path);
-      this.mainFs.resetCache();
-    } else {
-      return this.getWriteFs().symlink(target, path);
-    }
-  }
-  async symlinkBatch(symlinks) {
-    if (this.readBackend !== this.writeBackend && this.workerFs) {
-      await this.workerFs.symlinkBatch(symlinks);
-      this.mainFs.resetCache();
-    } else {
-      return this.getWriteFs().symlinkBatch(symlinks);
-    }
-  }
-  async rename(oldPath, newPath) {
-    return this.getWriteFs().rename(oldPath, newPath);
-  }
-  async copyFile(src, dest, mode) {
-    return this.getWriteFs().copyFile(src, dest, mode);
-  }
-  async cp(src, dest, options) {
-    return this.getWriteFs().cp(src, dest, options);
-  }
-  async rm(path, options) {
-    return this.getWriteFs().rm(path, options);
-  }
-  async chmod(path, mode) {
-    return this.getWriteFs().chmod(path, mode);
-  }
-  async chown(path, uid, gid) {
-    return this.getWriteFs().chown(path, uid, gid);
-  }
-  async utimes(path, atime, mtime) {
-    return this.getWriteFs().utimes(path, atime, mtime);
-  }
-  async lutimes(path, atime, mtime) {
-    return this.getWriteFs().lutimes(path, atime, mtime);
-  }
-  async mkdtemp(prefix) {
-    return this.getWriteFs().mkdtemp(prefix);
-  }
-  /**
-   * Reset internal caches on both backends
-   */
-  async resetCache() {
-    this.mainFs.resetCache();
-    if (this.workerFs) {
-      await this.workerFs.resetCache();
-    }
-  }
-  /**
-   * Force full garbage collection on both backends
-   * More aggressive than resetCache() - reinitializes the worker's OPFS instance
-   */
-  async gc() {
-    this.mainFs.resetCache();
-    if (this.workerFs) {
-      await this.workerFs.gc();
-    }
-  }
-};
-
 // src/index.ts
 var OPFS = class {
   useSync;
@@ -2228,6 +1808,427 @@ var OPFS = class {
   }
 };
 
-export { OPFSHybrid, constants, OPFS as default };
-//# sourceMappingURL=index.js.map
-//# sourceMappingURL=index.js.map
+// src/opfs-worker-proxy.ts
+var OPFSWorker = class {
+  worker = null;
+  pendingRequests = /* @__PURE__ */ new Map();
+  nextId = 1;
+  readyPromise;
+  readyResolve;
+  /** File system constants */
+  constants = constants;
+  constructor(options = {}) {
+    this.readyPromise = new Promise((resolve) => {
+      this.readyResolve = resolve;
+    });
+    this.initWorker(options);
+  }
+  initWorker(options) {
+    const { workerUrl, workerOptions = { type: "module" } } = options;
+    if (workerUrl) {
+      this.worker = new Worker(workerUrl, workerOptions);
+    } else {
+      throw new Error(
+        'OPFSWorker requires a workerUrl option pointing to the worker script. Example: new OPFSWorker({ workerUrl: new URL("./opfs-worker.js", import.meta.url) })'
+      );
+    }
+    this.worker.onmessage = (event) => {
+      const { id, type, result, error } = event.data;
+      if (type === "ready") {
+        this.readyResolve();
+        return;
+      }
+      if (id !== void 0) {
+        const pending = this.pendingRequests.get(id);
+        if (pending) {
+          this.pendingRequests.delete(id);
+          if (error) {
+            const fsError = new FSError(error.message, error.code || "UNKNOWN");
+            pending.reject(fsError);
+          } else {
+            pending.resolve(result);
+          }
+        }
+      }
+    };
+    this.worker.onerror = (event) => {
+      console.error("[OPFSWorker] Worker error:", event);
+    };
+  }
+  /**
+   * Wait for the worker to be ready
+   */
+  async ready() {
+    return this.readyPromise;
+  }
+  /**
+   * Terminate the worker
+   */
+  terminate() {
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+      for (const [, pending] of this.pendingRequests) {
+        pending.reject(new Error("Worker terminated"));
+      }
+      this.pendingRequests.clear();
+    }
+  }
+  call(method, args, transfer) {
+    return new Promise((resolve, reject) => {
+      if (!this.worker) {
+        reject(new Error("Worker not initialized or terminated"));
+        return;
+      }
+      const id = this.nextId++;
+      this.pendingRequests.set(id, {
+        resolve,
+        reject
+      });
+      const message = { id, method, args };
+      if (transfer && transfer.length > 0) {
+        this.worker.postMessage(message, transfer);
+      } else {
+        this.worker.postMessage(message);
+      }
+    });
+  }
+  // File operations
+  async readFile(path, options) {
+    const result = await this.call("readFile", [path, options]);
+    return result;
+  }
+  async writeFile(path, data, options) {
+    const transfer = [];
+    if (data instanceof Uint8Array) {
+      transfer.push(data.buffer);
+    }
+    await this.call("writeFile", [path, data, options], transfer);
+  }
+  async readFileBatch(paths) {
+    return this.call("readFileBatch", [paths]);
+  }
+  async writeFileBatch(entries) {
+    const transfer = [];
+    for (const entry of entries) {
+      if (entry.data instanceof Uint8Array) {
+        transfer.push(entry.data.buffer);
+      }
+    }
+    await this.call("writeFileBatch", [entries], transfer);
+  }
+  async appendFile(path, data, options) {
+    const transfer = [];
+    if (data instanceof Uint8Array) {
+      transfer.push(data.buffer);
+    }
+    await this.call("appendFile", [path, data, options], transfer);
+  }
+  async copyFile(src, dest, mode) {
+    await this.call("copyFile", [src, dest, mode]);
+  }
+  async unlink(path) {
+    await this.call("unlink", [path]);
+  }
+  async truncate(path, len) {
+    await this.call("truncate", [path, len]);
+  }
+  // Directory operations
+  async mkdir(path) {
+    await this.call("mkdir", [path]);
+  }
+  async rmdir(path) {
+    await this.call("rmdir", [path]);
+  }
+  async readdir(path, options) {
+    const result = await this.call("readdir", [path, options]);
+    if (options?.withFileTypes && Array.isArray(result)) {
+      return result.map((item) => {
+        if (typeof item === "object" && "name" in item) {
+          const entry = item;
+          return {
+            name: entry.name,
+            isFile: () => entry._isFile ?? false,
+            isDirectory: () => entry._isDir ?? false,
+            isSymbolicLink: () => entry._isSymlink ?? false
+          };
+        }
+        return item;
+      });
+    }
+    return result;
+  }
+  async cp(src, dest, options) {
+    await this.call("cp", [src, dest, options]);
+  }
+  async rm(path, options) {
+    await this.call("rm", [path, options]);
+  }
+  // Stat operations
+  async stat(path) {
+    const result = await this.call("stat", [path]);
+    return this.deserializeStats(result);
+  }
+  async lstat(path) {
+    const result = await this.call("lstat", [path]);
+    return this.deserializeStats(result);
+  }
+  deserializeStats(data) {
+    const ctime = new Date(data.ctime);
+    const mtime = new Date(data.mtime);
+    return {
+      type: data.type,
+      size: data.size,
+      mode: data.mode,
+      ctime,
+      ctimeMs: data.ctimeMs,
+      mtime,
+      mtimeMs: data.mtimeMs,
+      target: data.target,
+      isFile: () => data.type === "file",
+      isDirectory: () => data.type === "dir",
+      isSymbolicLink: () => data.type === "symlink"
+    };
+  }
+  async exists(path) {
+    return this.call("exists", [path]);
+  }
+  async access(path, mode) {
+    await this.call("access", [path, mode]);
+  }
+  async statfs(path) {
+    return this.call("statfs", [path]);
+  }
+  async du(path) {
+    return this.call("du", [path]);
+  }
+  // Symlink operations
+  async symlink(target, path) {
+    await this.call("symlink", [target, path]);
+  }
+  async readlink(path) {
+    return this.call("readlink", [path]);
+  }
+  async symlinkBatch(links) {
+    await this.call("symlinkBatch", [links]);
+  }
+  async realpath(path) {
+    return this.call("realpath", [path]);
+  }
+  // Other operations
+  async rename(oldPath, newPath) {
+    await this.call("rename", [oldPath, newPath]);
+  }
+  async mkdtemp(prefix) {
+    return this.call("mkdtemp", [prefix]);
+  }
+  async chmod(path, mode) {
+    await this.call("chmod", [path, mode]);
+  }
+  async chown(path, uid, gid) {
+    await this.call("chown", [path, uid, gid]);
+  }
+  async utimes(path, atime, mtime) {
+    await this.call("utimes", [path, atime, mtime]);
+  }
+  async lutimes(path, atime, mtime) {
+    await this.call("lutimes", [path, atime, mtime]);
+  }
+  /**
+   * Reset internal caches to free memory
+   * Useful for long-running benchmarks or after bulk operations
+   */
+  async resetCache() {
+    await this.call("resetCache", []);
+  }
+  /**
+   * Force full garbage collection by reinitializing the OPFS instance in the worker
+   * This completely releases all handles and caches, preventing memory leaks in long-running operations
+   * More aggressive than resetCache() - use when resetCache() isn't sufficient
+   */
+  async gc() {
+    await this.call("gc", []);
+  }
+};
+
+// src/opfs-hybrid.ts
+var OPFSHybrid = class {
+  mainFs;
+  workerFs = null;
+  readBackend;
+  writeBackend;
+  workerUrl;
+  workerReady = null;
+  verbose;
+  constructor(options = {}) {
+    this.readBackend = options.read ?? "main";
+    this.writeBackend = options.write ?? "worker";
+    this.workerUrl = options.workerUrl;
+    this.verbose = options.verbose ?? false;
+    this.mainFs = new OPFS({ useSync: false, verbose: this.verbose });
+    if (this.readBackend === "worker" || this.writeBackend === "worker") {
+      if (!this.workerUrl) {
+        throw new Error("workerUrl is required when using worker backend");
+      }
+      this.workerFs = new OPFSWorker({ workerUrl: this.workerUrl });
+      this.workerReady = this.workerFs.ready();
+    }
+  }
+  /**
+   * Wait for all backends to be ready
+   */
+  async ready() {
+    if (this.workerReady) {
+      await this.workerReady;
+    }
+  }
+  /**
+   * Terminate worker if active
+   */
+  terminate() {
+    if (this.workerFs) {
+      this.workerFs.terminate();
+      this.workerFs = null;
+    }
+  }
+  getReadFs() {
+    if (this.readBackend === "worker" && this.workerFs) {
+      return this.workerFs;
+    }
+    return this.mainFs;
+  }
+  getWriteFs() {
+    if (this.writeBackend === "worker" && this.workerFs) {
+      return this.workerFs;
+    }
+    return this.mainFs;
+  }
+  // ============ Read Operations ============
+  async readFile(path, options) {
+    return this.getReadFs().readFile(path, options);
+  }
+  async readFileBatch(paths) {
+    return this.getReadFs().readFileBatch(paths);
+  }
+  async readdir(path, options) {
+    return this.getReadFs().readdir(path, options);
+  }
+  async stat(path) {
+    return this.getReadFs().stat(path);
+  }
+  async lstat(path) {
+    return this.getReadFs().lstat(path);
+  }
+  async exists(path) {
+    return this.getReadFs().exists(path);
+  }
+  async access(path, mode) {
+    return this.getReadFs().access(path, mode);
+  }
+  async readlink(path) {
+    return this.getReadFs().readlink(path);
+  }
+  async realpath(path) {
+    return this.getReadFs().realpath(path);
+  }
+  async statfs(path) {
+    return this.getReadFs().statfs(path);
+  }
+  async du(path) {
+    return this.getReadFs().du(path);
+  }
+  // ============ Write Operations ============
+  async writeFile(path, data, options) {
+    return this.getWriteFs().writeFile(path, data, options);
+  }
+  async writeFileBatch(entries) {
+    return this.getWriteFs().writeFileBatch(entries);
+  }
+  async appendFile(path, data, options) {
+    return this.getWriteFs().appendFile(path, data, options);
+  }
+  async mkdir(path) {
+    return this.getWriteFs().mkdir(path);
+  }
+  async rmdir(path) {
+    if (this.readBackend !== this.writeBackend && this.workerFs) {
+      await this.workerFs.rmdir(path);
+      this.mainFs.resetCache();
+    } else {
+      return this.getWriteFs().rmdir(path);
+    }
+  }
+  async unlink(path) {
+    return this.getWriteFs().unlink(path);
+  }
+  async truncate(path, len) {
+    return this.getWriteFs().truncate(path, len);
+  }
+  async symlink(target, path) {
+    if (this.readBackend !== this.writeBackend && this.workerFs) {
+      await this.workerFs.symlink(target, path);
+      this.mainFs.resetCache();
+    } else {
+      return this.getWriteFs().symlink(target, path);
+    }
+  }
+  async symlinkBatch(symlinks) {
+    if (this.readBackend !== this.writeBackend && this.workerFs) {
+      await this.workerFs.symlinkBatch(symlinks);
+      this.mainFs.resetCache();
+    } else {
+      return this.getWriteFs().symlinkBatch(symlinks);
+    }
+  }
+  async rename(oldPath, newPath) {
+    return this.getWriteFs().rename(oldPath, newPath);
+  }
+  async copyFile(src, dest, mode) {
+    return this.getWriteFs().copyFile(src, dest, mode);
+  }
+  async cp(src, dest, options) {
+    return this.getWriteFs().cp(src, dest, options);
+  }
+  async rm(path, options) {
+    return this.getWriteFs().rm(path, options);
+  }
+  async chmod(path, mode) {
+    return this.getWriteFs().chmod(path, mode);
+  }
+  async chown(path, uid, gid) {
+    return this.getWriteFs().chown(path, uid, gid);
+  }
+  async utimes(path, atime, mtime) {
+    return this.getWriteFs().utimes(path, atime, mtime);
+  }
+  async lutimes(path, atime, mtime) {
+    return this.getWriteFs().lutimes(path, atime, mtime);
+  }
+  async mkdtemp(prefix) {
+    return this.getWriteFs().mkdtemp(prefix);
+  }
+  /**
+   * Reset internal caches on both backends
+   */
+  async resetCache() {
+    this.mainFs.resetCache();
+    if (this.workerFs) {
+      await this.workerFs.resetCache();
+    }
+  }
+  /**
+   * Force full garbage collection on both backends
+   * More aggressive than resetCache() - reinitializes the worker's OPFS instance
+   */
+  async gc() {
+    this.mainFs.resetCache();
+    if (this.workerFs) {
+      await this.workerFs.gc();
+    }
+  }
+};
+var opfs_hybrid_default = OPFSHybrid;
+
+export { OPFSHybrid, opfs_hybrid_default as default };
+//# sourceMappingURL=opfs-hybrid.js.map
+//# sourceMappingURL=opfs-hybrid.js.map
