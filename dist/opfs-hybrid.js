@@ -907,7 +907,7 @@ var OPFS = class {
       const buffer = typeof data === "string" ? new TextEncoder().encode(data) : data;
       if (this.useSync) {
         const access = await fileHandle.createSyncAccessHandle();
-        access.truncate(0);
+        access.truncate(buffer.length);
         access.write(buffer, { at: 0 });
         access.close();
       } else {
@@ -964,7 +964,7 @@ var OPFS = class {
             const fileHandle = await parentHandle.getFileHandle(name, { create: true });
             if (this.useSync) {
               const access = await fileHandle.createSyncAccessHandle();
-              access.truncate(0);
+              access.truncate(buffer.length);
               access.write(buffer, { at: 0 });
               access.close();
             } else {

@@ -305,7 +305,8 @@ export default class OPFS {
 
       if (this.useSync) {
         const access = await fileHandle!.createSyncAccessHandle()
-        access.truncate(0)
+        // Set exact size (more efficient than truncate(0) + write)
+        access.truncate(buffer.length)
         access.write(buffer, { at: 0 })
         access.close()
       } else {
@@ -377,7 +378,8 @@ export default class OPFS {
 
             if (this.useSync) {
               const access = await fileHandle.createSyncAccessHandle()
-              access.truncate(0)
+              // Set exact size (more efficient than truncate(0) + write)
+              access.truncate(buffer.length)
               access.write(buffer, { at: 0 })
               access.close()
             } else {
