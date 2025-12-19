@@ -64,13 +64,17 @@ The Origin Private File System API provides **direct access to the device's stor
 - **Optimized I/O**: Reduced serialization overhead compared to IndexedDB or localStorage
 - **Streaming Support**: Efficient handling of large files without memory constraints
 
-### 📊 Performance Comparison
+### 📊 Performance vs LightningFS
 
-| Operation | localStorage | IndexedDB | OPFS-FS |
-|-----------|-------------|-----------|---------|
-| Small Files | ~50ms | ~20ms | **~5ms** |
-| Large Files | Memory limited | ~100ms | **~15ms** |
-| Directory Ops | Not supported | Complex | **Native** |
+Benchmarked against [LightningFS](https://github.com/isomorphic-git/lightning-fs) (100 iterations):
+
+| Operation | LightningFS | OPFS-FS (Hybrid) | Speedup |
+|-----------|-------------|------------------|---------|
+| Batch Writes | 25.57ms | 1.73ms | **14.8x faster** |
+| Batch Reads | 12.64ms | 1.56ms | **8.1x faster** |
+| Single Writes | 66.45ms | 71.37ms | ~1x |
+| Single Reads | 66.76ms | 66.93ms | ~1x |
+| **Total** | **172.85ms** | **144.30ms** | **1.20x faster** |
 
 > **Note:** This package was previously published as `@componentor/opfs-fs`. If you're upgrading, simply change your imports from `@componentor/opfs-fs` to `@componentor/fs`.
 
@@ -136,14 +140,6 @@ await fs.gc()
 // Clean up when done
 fs.terminate()
 ```
-
-**Performance comparison** (100 iterations benchmark):
-| Mode | Average Time | vs LightningFS |
-|------|-------------|----------------|
-| Main Thread | ~175ms | ~1.0x |
-| Worker Only | ~145ms | 1.19x faster |
-| **Hybrid** | **~144ms** | **1.20x faster** |
-| LightningFS | ~173ms | baseline |
 
 ### File Operations
 
