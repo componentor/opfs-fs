@@ -181,3 +181,7 @@ export function resetFileSystem(): void {
 
 // Make resetFileSystem available globally
 globalThis.resetFileSystem = resetFileSystem
+
+// Note: CompressionStream/DecompressionStream are NOT globally mocked here
+// The packed-storage constructor checks for API availability and disables compression if not found
+// Compression tests provide their own mock within the test file

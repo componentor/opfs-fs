@@ -88,6 +88,8 @@ Creates a new OPFS filesystem instance.
 - `options.read` ('main' | 'worker', default: 'main') - Backend for read operations in hybrid mode
 - `options.write` ('main' | 'worker', default: 'worker') - Backend for write operations in hybrid mode
 - `options.verbose` (boolean, default: `false`) - Enable verbose logging
+- `options.useCompression` (boolean, default: `false`) - Enable gzip compression for batch writes. Can improve performance for text-heavy workloads.
+- `options.useChecksum` (boolean, default: `true`) - Enable CRC32 checksum for batch writes. Disable for maximum performance if data integrity verification is not needed.
 
 **Example:**
 ```javascript

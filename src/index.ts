@@ -68,7 +68,7 @@ export default class OPFS {
   public readonly constants = constants
 
   constructor(options: OPFSExtendedOptions = {}) {
-    const { useSync = true, verbose = false, workerUrl, read, write } = options
+    const { useSync = true, verbose = false, useCompression = false, useChecksum = true, workerUrl, read, write } = options
     this.verbose = verbose
 
     // If workerUrl is provided, use hybrid mode
@@ -83,13 +83,13 @@ export default class OPFS {
       this.useSync = false
       this.handleManager = new HandleManager()
       this.symlinkManager = new SymlinkManager(this.handleManager, false)
-      this.packedStorage = new PackedStorage(this.handleManager, false)
+      this.packedStorage = new PackedStorage(this.handleManager, false, useCompression, useChecksum)
     } else {
       this.useSync = useSync && typeof FileSystemFileHandle !== 'undefined' &&
         'createSyncAccessHandle' in FileSystemFileHandle.prototype
       this.handleManager = new HandleManager()
       this.symlinkManager = new SymlinkManager(this.handleManager, this.useSync)
-      this.packedStorage = new PackedStorage(this.handleManager, this.useSync)
+      this.packedStorage = new PackedStorage(this.handleManager, this.useSync, useCompression, useChecksum)
     }
   }
 

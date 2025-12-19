@@ -8,13 +8,83 @@
  * [index length: 4 bytes][CRC32: 4 bytes][JSON index][file data...]
  *
  * Index format:
- * { "path": { offset: number, size: number }, ... }
+ * { "path": { offset: number, size: number, originalSize?: number }, ... }
  *
+ * When originalSize is present, data is compressed (size = compressed, originalSize = uncompressed)
  * CRC32 is calculated over [JSON index][file data...] for integrity verification.
  */
 
 import type { HandleManager } from './handle-manager.js'
 import { createECORRUPTED } from './errors.js'
+
+// ============ Compression ============
+// Uses browser's native CompressionStream API
+
+async function compress(data: Uint8Array): Promise<Uint8Array> {
+  // Skip compression for small data (overhead not worth it)
+  if (data.length < 100) return data
+
+  try {
+    const stream = new CompressionStream('gzip')
+    const writer = stream.writable.getWriter()
+    writer.write(data)
+    writer.close()
+
+    const chunks: Uint8Array[] = []
+    const reader = stream.readable.getReader()
+    let totalSize = 0
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+      totalSize += value.length
+    }
+
+    // Only use compressed if it's actually smaller
+    if (totalSize >= data.length) return data
+
+    const result = new Uint8Array(totalSize)
+    let offset = 0
+    for (const chunk of chunks) {
+      result.set(chunk, offset)
+      offset += chunk.length
+    }
+    return result
+  } catch {
+    // Compression not available, return original
+    return data
+  }
+}
+
+async function decompress(data: Uint8Array): Promise<Uint8Array> {
+  // Decompression MUST succeed for compressed data - throw on failure
+  const stream = new DecompressionStream('gzip')
+  const writer = stream.writable.getWriter()
+  writer.write(data)
+  writer.close()
+
+  const chunks: Uint8Array[] = []
+  const reader = stream.readable.getReader()
+  let totalSize = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+    totalSize += value.length
+  }
+
+  const result = new Uint8Array(totalSize)
+  let offset = 0
+  for (const chunk of chunks) {
+    result.set(chunk, offset)
+    offset += chunk.length
+  }
+  return result
+}
+
+// ============ CRC32 ============
 
 // CRC32 lookup table (pre-computed for performance)
 const CRC32_TABLE = new Uint32Array(256)
@@ -37,8 +107,16 @@ function crc32(data: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0
 }
 
+// ============ Types ============
+
+interface PackIndexEntry {
+  offset: number
+  size: number
+  originalSize?: number // Present if compressed
+}
+
 interface PackIndex {
-  [path: string]: { offset: number; size: number }
+  [path: string]: PackIndexEntry
 }
 
 const PACK_FILE = '/.opfs-pack'
@@ -46,12 +124,17 @@ const PACK_FILE = '/.opfs-pack'
 export class PackedStorage {
   private handleManager: HandleManager
   private useSync: boolean
+  private useCompression: boolean
+  private useChecksum: boolean
   private index: PackIndex | null = null
   private indexLoaded = false
 
-  constructor(handleManager: HandleManager, useSync: boolean) {
+  constructor(handleManager: HandleManager, useSync: boolean, useCompression = false, useChecksum = true) {
     this.handleManager = handleManager
     this.useSync = useSync
+    // Only enable compression if API is available
+    this.useCompression = useCompression && typeof CompressionStream !== 'undefined'
+    this.useChecksum = useChecksum
   }
 
   /**
@@ -110,10 +193,12 @@ export class PackedStorage {
         access.read(content, { at: 8 })
         access.close()
 
-        // Verify CRC32
-        const calculatedCrc = crc32(content)
-        if (calculatedCrc !== storedCrc) {
-          throw createECORRUPTED(PACK_FILE)
+        // Verify CRC32 if enabled
+        if (this.useChecksum && storedCrc !== 0) {
+          const calculatedCrc = crc32(content)
+          if (calculatedCrc !== storedCrc) {
+            throw createECORRUPTED(PACK_FILE)
+          }
         }
 
         // Parse index from content
@@ -130,11 +215,13 @@ export class PackedStorage {
         const indexLen = view.getUint32(0, true)
         const storedCrc = view.getUint32(4, true)
 
-        // Verify CRC32 over content (everything after header)
+        // Verify CRC32 over content (everything after header) if enabled
         const content = data.subarray(8)
-        const calculatedCrc = crc32(content)
-        if (calculatedCrc !== storedCrc) {
-          throw createECORRUPTED(PACK_FILE)
+        if (this.useChecksum && storedCrc !== 0) {
+          const calculatedCrc = crc32(content)
+          if (calculatedCrc !== storedCrc) {
+            throw createECORRUPTED(PACK_FILE)
+          }
         }
 
         const indexJson = new TextDecoder().decode(content.subarray(0, indexLen))
@@ -155,15 +242,18 @@ export class PackedStorage {
 
   /**
    * Get file size from pack (for stat)
+   * Returns originalSize if compressed, otherwise size
    */
   async getSize(path: string): Promise<number | null> {
     const index = await this.loadIndex()
     const entry = index[path]
-    return entry ? entry.size : null
+    if (!entry) return null
+    return entry.originalSize ?? entry.size
   }
 
   /**
    * Read a file from the pack
+   * Handles decompression if file was stored compressed
    */
   async read(path: string): Promise<Uint8Array | null> {
     const index = await this.loadIndex()
@@ -173,16 +263,22 @@ export class PackedStorage {
     const { fileHandle } = await this.handleManager.getHandle(PACK_FILE)
     if (!fileHandle) return null
 
-    const buffer = new Uint8Array(entry.size)
+    let buffer: Uint8Array
 
     if (this.useSync) {
       const access = await fileHandle.createSyncAccessHandle()
+      buffer = new Uint8Array(entry.size)
       access.read(buffer, { at: entry.offset })
       access.close()
     } else {
       const file = await fileHandle.getFile()
       const data = new Uint8Array(await file.arrayBuffer())
-      buffer.set(data.subarray(entry.offset, entry.offset + entry.size))
+      buffer = data.slice(entry.offset, entry.offset + entry.size)
+    }
+
+    // Decompress if needed
+    if (entry.originalSize !== undefined) {
+      return decompress(buffer)
     }
 
     return buffer
@@ -191,6 +287,7 @@ export class PackedStorage {
   /**
    * Read multiple files from the pack in a single operation
    * Loads index once, reads all data in parallel
+   * Handles decompression if files were stored compressed
    */
   async readBatch(paths: string[]): Promise<Map<string, Uint8Array | null>> {
     const results = new Map<string, Uint8Array | null>()
@@ -199,11 +296,11 @@ export class PackedStorage {
     const index = await this.loadIndex()
 
     // Find which paths are in the pack
-    const toRead: Array<{ path: string; offset: number; size: number }> = []
+    const toRead: Array<{ path: string; offset: number; size: number; originalSize?: number }> = []
     for (const path of paths) {
       const entry = index[path]
       if (entry) {
-        toRead.push({ path, offset: entry.offset, size: entry.size })
+        toRead.push({ path, offset: entry.offset, size: entry.size, originalSize: entry.originalSize })
       } else {
         results.set(path, null)
       }
@@ -219,22 +316,40 @@ export class PackedStorage {
       return results
     }
 
+    // Read all files
+    const decompressPromises: Array<{ path: string; promise: Promise<Uint8Array> }> = []
+
     if (this.useSync) {
       const access = await fileHandle.createSyncAccessHandle()
-      for (const { path, offset, size } of toRead) {
+      for (const { path, offset, size, originalSize } of toRead) {
         const buffer = new Uint8Array(size)
         access.read(buffer, { at: offset })
-        results.set(path, buffer)
+
+        if (originalSize !== undefined) {
+          // Queue for decompression
+          decompressPromises.push({ path, promise: decompress(buffer) })
+        } else {
+          results.set(path, buffer)
+        }
       }
       access.close()
     } else {
       const file = await fileHandle.getFile()
       const data = new Uint8Array(await file.arrayBuffer())
-      for (const { path, offset, size } of toRead) {
-        const buffer = new Uint8Array(size)
-        buffer.set(data.subarray(offset, offset + size))
-        results.set(path, buffer)
+      for (const { path, offset, size, originalSize } of toRead) {
+        const buffer = data.slice(offset, offset + size)
+
+        if (originalSize !== undefined) {
+          decompressPromises.push({ path, promise: decompress(buffer) })
+        } else {
+          results.set(path, buffer)
+        }
       }
+    }
+
+    // Wait for all decompressions
+    for (const { path, promise } of decompressPromises) {
+      results.set(path, await promise)
     }
 
     return results
@@ -244,6 +359,7 @@ export class PackedStorage {
    * Write multiple files to the pack in a single operation
    * This is the key optimization - 100 files become 1 write!
    * Includes CRC32 checksum for integrity verification.
+   * Optionally compresses data for smaller storage.
    * Note: This replaces the entire pack with the new entries
    */
   async writeBatch(entries: Array<{ path: string; data: Uint8Array }>): Promise<void> {
@@ -251,9 +367,26 @@ export class PackedStorage {
 
     const encoder = new TextEncoder()
 
-    // Calculate total data size
+    // Compress data if enabled
+    let processedEntries: Array<{ path: string; data: Uint8Array; originalSize?: number }>
+    if (this.useCompression) {
+      processedEntries = await Promise.all(
+        entries.map(async ({ path, data }) => {
+          const compressed = await compress(data)
+          // Only use compressed if it's actually smaller
+          if (compressed.length < data.length) {
+            return { path, data: compressed, originalSize: data.length }
+          }
+          return { path, data }
+        })
+      )
+    } else {
+      processedEntries = entries
+    }
+
+    // Calculate total data size (using compressed sizes where applicable)
     let totalDataSize = 0
-    for (const { data } of entries) {
+    for (const { data } of processedEntries) {
       totalDataSize += data.length
     }
 
@@ -269,8 +402,12 @@ export class PackedStorage {
       prevHeaderSize = headerSize
 
       let currentOffset = headerSize
-      for (const { path, data } of entries) {
-        newIndex[path] = { offset: currentOffset, size: data.length }
+      for (const { path, data, originalSize } of processedEntries) {
+        const entry: PackIndexEntry = { offset: currentOffset, size: data.length }
+        if (originalSize !== undefined) {
+          entry.originalSize = originalSize
+        }
+        newIndex[path] = entry
         currentOffset += data.length
       }
 
@@ -288,14 +425,14 @@ export class PackedStorage {
     packBuffer.set(finalIndexBuf, 8)
 
     // Write data at correct offsets
-    for (const { path, data } of entries) {
+    for (const { path, data } of processedEntries) {
       const entry = newIndex[path]
       packBuffer.set(data, entry.offset)
     }
 
-    // Calculate CRC32 over content (index + data, everything after header)
+    // Calculate CRC32 over content (index + data, everything after header) if enabled
     const content = packBuffer.subarray(8)
-    const checksum = crc32(content)
+    const checksum = this.useChecksum ? crc32(content) : 0
 
     // Write header (index length + CRC32)
     view.setUint32(0, finalIndexBuf.length, true)
@@ -365,8 +502,8 @@ export class PackedStorage {
         newContent.set(dataPortion, newIndexBuf.length)
       }
 
-      // Calculate new CRC32
-      const checksum = crc32(newContent)
+      // Calculate new CRC32 if enabled
+      const checksum = this.useChecksum ? crc32(newContent) : 0
 
       // Build new header
       const newHeader = new Uint8Array(8)
@@ -398,8 +535,8 @@ export class PackedStorage {
       newContent.set(newIndexBuf, 0)
       newContent.set(dataPortion, newIndexBuf.length)
 
-      // Calculate CRC32
-      const checksum = crc32(newContent)
+      // Calculate CRC32 if enabled
+      const checksum = this.useChecksum ? crc32(newContent) : 0
 
       // Build new file
       const newFile = new Uint8Array(8 + newContent.length)

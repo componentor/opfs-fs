@@ -29,6 +29,10 @@ interface OPFSOptions {
     useSync?: boolean;
     /** Enable verbose logging (default: false) */
     verbose?: boolean;
+    /** Enable compression for batch writes (default: false) */
+    useCompression?: boolean;
+    /** Enable CRC32 checksum for batch writes (default: true) */
+    useChecksum?: boolean;
 }
 /**
  * Options for readFile operation
