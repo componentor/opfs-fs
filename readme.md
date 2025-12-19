@@ -13,7 +13,7 @@
 - ⚡ **Isomorphic Git Ready** - Perfect companion for browser-based Git operations
 - 🔗 **Symlink Support** - Full symbolic link emulation for advanced file operations
 - 📦 **Zero Dependencies** - Lightweight and efficient
-- ✅ **Fully Tested** - 199 comprehensive tests with 100% pass rate
+- ✅ **Fully Tested** - 214 comprehensive tests with 100% pass rate
 - 📁 **Full fs Compatibility** - access, appendFile, copyFile, cp, rm, truncate, open, opendir, streams, and more
 - 🚀 **Hybrid Mode** - Optimal performance with reads on main thread and writes on worker
 
@@ -133,9 +133,6 @@ await fs.ready()
 // Use like normal - hybrid routing happens automatically
 await fs.writeFile('test.txt', 'Hello World') // Routed to worker
 const data = await fs.readFile('test.txt')     // Routed to main thread
-
-// For long-running apps, periodically call gc() to prevent memory leaks
-await fs.gc()
 
 // Clean up when done
 fs.terminate()
@@ -702,7 +699,7 @@ npm run test:watch
 ```
 
 **Test Coverage:**
-- ✅ 199 tests with 100% pass rate
+- ✅ 214 tests with 100% pass rate
 - ✅ File read/write operations (text and binary)
 - ✅ Directory operations (create, remove, list)
 - ✅ File metadata and statistics
