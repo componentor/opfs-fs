@@ -138,11 +138,12 @@ fs.terminate()
 ```
 
 **Performance comparison** (100 iterations benchmark):
-| Mode | Average Time |
-|------|-------------|
-| Main Thread | ~335ms |
-| Worker Only | ~274ms |
-| **Hybrid** | **~262ms** |
+| Mode | Average Time | vs LightningFS |
+|------|-------------|----------------|
+| Main Thread | ~175ms | ~1.0x |
+| Worker Only | ~145ms | 1.19x faster |
+| **Hybrid** | **~144ms** | **1.20x faster** |
+| LightningFS | ~173ms | baseline |
 
 ### File Operations
 
