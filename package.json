@@ -1,6 +1,6 @@
 {
   "name": "@componentor/fs",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "A blazing-fast, Node.js-compatible filesystem for the browser using OPFS",
   "type": "module",
   "main": "./dist/index.js",
