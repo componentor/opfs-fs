@@ -1,5 +1,6 @@
 import type { SymlinkCache, SymlinkDefinition } from './types.js'
 import type { HandleManager } from './handle-manager.js'
+import { fileLockManager } from './handle-manager.js'
 import { normalize } from './path-utils.js'
 import { createELOOP, createEINVAL, createEEXIST } from './errors.js'
 
@@ -101,13 +102,21 @@ export class SymlinkManager {
     const buffer = new TextEncoder().encode(data)
 
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle()
-      access.truncate(0)
-      let written = 0
-      while (written < buffer.length) {
-        written += access.write(buffer.subarray(written), { at: written })
+      const releaseLock = await fileLockManager.acquire(SYMLINK_FILE)
+      try {
+        const access = await fileHandle.createSyncAccessHandle()
+        try {
+          access.truncate(0)
+          let written = 0
+          while (written < buffer.length) {
+            written += access.write(buffer.subarray(written), { at: written })
+          }
+        } finally {
+          access.close()
+        }
+      } finally {
+        releaseLock()
       }
-      access.close()
     } else {
       const writable = await fileHandle.createWritable()
       await writable.write(buffer)

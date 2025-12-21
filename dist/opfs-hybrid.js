@@ -145,6 +145,52 @@ function segments(path) {
 // src/handle-manager.ts
 var FILE_HANDLE_POOL_SIZE = 50;
 var DIR_CACHE_MAX_SIZE = 200;
+var FileLockManager = class {
+  locks = /* @__PURE__ */ new Map();
+  lockResolvers = /* @__PURE__ */ new Map();
+  waitQueues = /* @__PURE__ */ new Map();
+  /**
+   * Acquire an exclusive lock on a file path.
+   * If the file is already locked, waits until it's released.
+   * Returns a release function that MUST be called when done.
+   */
+  async acquire(path) {
+    const normalizedPath = normalize(path);
+    while (this.locks.has(normalizedPath)) {
+      await this.locks.get(normalizedPath);
+    }
+    let resolve;
+    const lockPromise = new Promise((r) => {
+      resolve = r;
+    });
+    this.locks.set(normalizedPath, lockPromise);
+    this.lockResolvers.set(normalizedPath, resolve);
+    return () => {
+      const resolver = this.lockResolvers.get(normalizedPath);
+      this.locks.delete(normalizedPath);
+      this.lockResolvers.delete(normalizedPath);
+      if (resolver) resolver();
+    };
+  }
+  /**
+   * Check if a file is currently locked
+   */
+  isLocked(path) {
+    return this.locks.has(normalize(path));
+  }
+  /**
+   * Clear all locks (use with caution, mainly for cleanup)
+   */
+  clearAll() {
+    for (const resolver of this.lockResolvers.values()) {
+      resolver();
+    }
+    this.locks.clear();
+    this.lockResolvers.clear();
+    this.waitQueues.clear();
+  }
+};
+var fileLockManager = new FileLockManager();
 var HandleManager = class {
   rootPromise;
   dirCache = /* @__PURE__ */ new Map();
@@ -402,13 +448,21 @@ var SymlinkManager = class {
     if (!fileHandle) return;
     const buffer = new TextEncoder().encode(data);
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle();
-      access.truncate(0);
-      let written = 0;
-      while (written < buffer.length) {
-        written += access.write(buffer.subarray(written), { at: written });
+      const releaseLock = await fileLockManager.acquire(SYMLINK_FILE);
+      try {
+        const access = await fileHandle.createSyncAccessHandle();
+        try {
+          access.truncate(0);
+          let written = 0;
+          while (written < buffer.length) {
+            written += access.write(buffer.subarray(written), { at: written });
+          }
+        } finally {
+          access.close();
+        }
+      } finally {
+        releaseLock();
       }
-      access.close();
     } else {
       const writable = await fileHandle.createWritable();
       await writable.write(buffer);
@@ -653,28 +707,11 @@ var PackedStorage = class {
   useChecksum;
   index = null;
   indexLoaded = false;
-  lockPromise = null;
   constructor(handleManager, useSync, useCompression = false, useChecksum = true) {
     this.handleManager = handleManager;
     this.useSync = useSync;
     this.useCompression = useCompression && typeof CompressionStream !== "undefined";
     this.useChecksum = useChecksum;
-  }
-  /**
-   * Acquire lock for pack file access (prevents concurrent handle conflicts)
-   */
-  async acquireLock() {
-    while (this.lockPromise) {
-      await this.lockPromise;
-    }
-    let release;
-    this.lockPromise = new Promise((resolve) => {
-      release = () => {
-        this.lockPromise = null;
-        resolve();
-      };
-    });
-    return release;
   }
   /**
    * Reset pack storage state (memory only)
@@ -707,30 +744,35 @@ var PackedStorage = class {
         return {};
       }
       if (this.useSync) {
-        const access = await fileHandle.createSyncAccessHandle();
+        const releaseLock = await fileLockManager.acquire(PACK_FILE);
         try {
-          const size = access.getSize();
-          if (size < 8) {
-            return {};
-          }
-          const header = new Uint8Array(8);
-          access.read(header, { at: 0 });
-          const view = new DataView(header.buffer);
-          const indexLen = view.getUint32(0, true);
-          const storedCrc = view.getUint32(4, true);
-          const contentSize = size - 8;
-          const content = new Uint8Array(contentSize);
-          access.read(content, { at: 8 });
-          if (this.useChecksum && storedCrc !== 0) {
-            const calculatedCrc = crc32(content);
-            if (calculatedCrc !== storedCrc) {
-              throw createECORRUPTED(PACK_FILE);
+          const access = await fileHandle.createSyncAccessHandle();
+          try {
+            const size = access.getSize();
+            if (size < 8) {
+              return {};
             }
+            const header = new Uint8Array(8);
+            access.read(header, { at: 0 });
+            const view = new DataView(header.buffer);
+            const indexLen = view.getUint32(0, true);
+            const storedCrc = view.getUint32(4, true);
+            const contentSize = size - 8;
+            const content = new Uint8Array(contentSize);
+            access.read(content, { at: 8 });
+            if (this.useChecksum && storedCrc !== 0) {
+              const calculatedCrc = crc32(content);
+              if (calculatedCrc !== storedCrc) {
+                throw createECORRUPTED(PACK_FILE);
+              }
+            }
+            const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
+            return JSON.parse(indexJson);
+          } finally {
+            access.close();
           }
-          const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
-          return JSON.parse(indexJson);
         } finally {
-          access.close();
+          releaseLock();
         }
       } else {
         const file = await fileHandle.getFile();
@@ -759,43 +801,33 @@ var PackedStorage = class {
    * Check if a path exists in the pack
    */
   async has(path) {
-    const release = await this.acquireLock();
-    try {
-      const index = await this.loadIndex();
-      return path in index;
-    } finally {
-      release();
-    }
+    const index = await this.loadIndex();
+    return path in index;
   }
   /**
    * Get file size from pack (for stat)
    * Returns originalSize if compressed, otherwise size
    */
   async getSize(path) {
-    const release = await this.acquireLock();
-    try {
-      const index = await this.loadIndex();
-      const entry = index[path];
-      if (!entry) return null;
-      return entry.originalSize ?? entry.size;
-    } finally {
-      release();
-    }
+    const index = await this.loadIndex();
+    const entry = index[path];
+    if (!entry) return null;
+    return entry.originalSize ?? entry.size;
   }
   /**
    * Read a file from the pack
    * Handles decompression if file was stored compressed
    */
   async read(path) {
-    const release = await this.acquireLock();
-    try {
-      const index = await this.loadIndex();
-      const entry = index[path];
-      if (!entry) return null;
-      const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
-      if (!fileHandle) return null;
-      let buffer;
-      if (this.useSync) {
+    const index = await this.loadIndex();
+    const entry = index[path];
+    if (!entry) return null;
+    const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
+    if (!fileHandle) return null;
+    let buffer;
+    if (this.useSync) {
+      const releaseLock = await fileLockManager.acquire(PACK_FILE);
+      try {
         const access = await fileHandle.createSyncAccessHandle();
         try {
           buffer = new Uint8Array(entry.size);
@@ -803,18 +835,18 @@ var PackedStorage = class {
         } finally {
           access.close();
         }
-      } else {
-        const file = await fileHandle.getFile();
-        const data = new Uint8Array(await file.arrayBuffer());
-        buffer = data.slice(entry.offset, entry.offset + entry.size);
+      } finally {
+        releaseLock();
       }
-      if (entry.originalSize !== void 0) {
-        return decompress(buffer);
-      }
-      return buffer;
-    } finally {
-      release();
+    } else {
+      const file = await fileHandle.getFile();
+      const data = new Uint8Array(await file.arrayBuffer());
+      buffer = data.slice(entry.offset, entry.offset + entry.size);
     }
+    if (entry.originalSize !== void 0) {
+      return decompress(buffer);
+    }
+    return buffer;
   }
   /**
    * Read multiple files from the pack in a single operation
@@ -824,28 +856,28 @@ var PackedStorage = class {
   async readBatch(paths) {
     const results = /* @__PURE__ */ new Map();
     if (paths.length === 0) return results;
-    const release = await this.acquireLock();
-    try {
-      const index = await this.loadIndex();
-      const toRead = [];
-      for (const path of paths) {
-        const entry = index[path];
-        if (entry) {
-          toRead.push({ path, offset: entry.offset, size: entry.size, originalSize: entry.originalSize });
-        } else {
-          results.set(path, null);
-        }
+    const index = await this.loadIndex();
+    const toRead = [];
+    for (const path of paths) {
+      const entry = index[path];
+      if (entry) {
+        toRead.push({ path, offset: entry.offset, size: entry.size, originalSize: entry.originalSize });
+      } else {
+        results.set(path, null);
       }
-      if (toRead.length === 0) return results;
-      const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
-      if (!fileHandle) {
-        for (const { path } of toRead) {
-          results.set(path, null);
-        }
-        return results;
+    }
+    if (toRead.length === 0) return results;
+    const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
+    if (!fileHandle) {
+      for (const { path } of toRead) {
+        results.set(path, null);
       }
-      const decompressPromises = [];
-      if (this.useSync) {
+      return results;
+    }
+    const decompressPromises = [];
+    if (this.useSync) {
+      const releaseLock = await fileLockManager.acquire(PACK_FILE);
+      try {
         const access = await fileHandle.createSyncAccessHandle();
         try {
           for (const { path, offset, size, originalSize } of toRead) {
@@ -860,25 +892,25 @@ var PackedStorage = class {
         } finally {
           access.close();
         }
-      } else {
-        const file = await fileHandle.getFile();
-        const data = new Uint8Array(await file.arrayBuffer());
-        for (const { path, offset, size, originalSize } of toRead) {
-          const buffer = data.slice(offset, offset + size);
-          if (originalSize !== void 0) {
-            decompressPromises.push({ path, promise: decompress(buffer) });
-          } else {
-            results.set(path, buffer);
-          }
+      } finally {
+        releaseLock();
+      }
+    } else {
+      const file = await fileHandle.getFile();
+      const data = new Uint8Array(await file.arrayBuffer());
+      for (const { path, offset, size, originalSize } of toRead) {
+        const buffer = data.slice(offset, offset + size);
+        if (originalSize !== void 0) {
+          decompressPromises.push({ path, promise: decompress(buffer) });
+        } else {
+          results.set(path, buffer);
         }
       }
-      for (const { path, promise } of decompressPromises) {
-        results.set(path, await promise);
-      }
-      return results;
-    } finally {
-      release();
     }
+    for (const { path, promise } of decompressPromises) {
+      results.set(path, await promise);
+    }
+    return results;
   }
   /**
    * Write multiple files to the pack in a single operation
@@ -889,62 +921,57 @@ var PackedStorage = class {
    */
   async writeBatch(entries) {
     if (entries.length === 0) return;
-    const release = await this.acquireLock();
-    try {
-      const encoder = new TextEncoder();
-      let processedEntries;
-      if (this.useCompression) {
-        processedEntries = await Promise.all(
-          entries.map(async ({ path, data }) => {
-            const compressed = await compress(data);
-            if (compressed.length < data.length) {
-              return { path, data: compressed, originalSize: data.length };
-            }
-            return { path, data };
-          })
-        );
-      } else {
-        processedEntries = entries;
-      }
-      let totalDataSize = 0;
-      for (const { data } of processedEntries) {
-        totalDataSize += data.length;
-      }
-      const newIndex = {};
-      let headerSize = 8;
-      let prevHeaderSize = 0;
-      while (headerSize !== prevHeaderSize) {
-        prevHeaderSize = headerSize;
-        let currentOffset = headerSize;
-        for (const { path, data, originalSize } of processedEntries) {
-          const entry = { offset: currentOffset, size: data.length };
-          if (originalSize !== void 0) {
-            entry.originalSize = originalSize;
+    const encoder = new TextEncoder();
+    let processedEntries;
+    if (this.useCompression) {
+      processedEntries = await Promise.all(
+        entries.map(async ({ path, data }) => {
+          const compressed = await compress(data);
+          if (compressed.length < data.length) {
+            return { path, data: compressed, originalSize: data.length };
           }
-          newIndex[path] = entry;
-          currentOffset += data.length;
-        }
-        const indexBuf = encoder.encode(JSON.stringify(newIndex));
-        headerSize = 8 + indexBuf.length;
-      }
-      const finalIndexBuf = encoder.encode(JSON.stringify(newIndex));
-      const totalSize = headerSize + totalDataSize;
-      const packBuffer = new Uint8Array(totalSize);
-      const view = new DataView(packBuffer.buffer);
-      packBuffer.set(finalIndexBuf, 8);
-      for (const { path, data } of processedEntries) {
-        const entry = newIndex[path];
-        packBuffer.set(data, entry.offset);
-      }
-      const content = packBuffer.subarray(8);
-      const checksum = this.useChecksum ? crc32(content) : 0;
-      view.setUint32(0, finalIndexBuf.length, true);
-      view.setUint32(4, checksum, true);
-      await this.writePackFile(packBuffer);
-      this.index = newIndex;
-    } finally {
-      release();
+          return { path, data };
+        })
+      );
+    } else {
+      processedEntries = entries;
     }
+    let totalDataSize = 0;
+    for (const { data } of processedEntries) {
+      totalDataSize += data.length;
+    }
+    const newIndex = {};
+    let headerSize = 8;
+    let prevHeaderSize = 0;
+    while (headerSize !== prevHeaderSize) {
+      prevHeaderSize = headerSize;
+      let currentOffset = headerSize;
+      for (const { path, data, originalSize } of processedEntries) {
+        const entry = { offset: currentOffset, size: data.length };
+        if (originalSize !== void 0) {
+          entry.originalSize = originalSize;
+        }
+        newIndex[path] = entry;
+        currentOffset += data.length;
+      }
+      const indexBuf = encoder.encode(JSON.stringify(newIndex));
+      headerSize = 8 + indexBuf.length;
+    }
+    const finalIndexBuf = encoder.encode(JSON.stringify(newIndex));
+    const totalSize = headerSize + totalDataSize;
+    const packBuffer = new Uint8Array(totalSize);
+    const view = new DataView(packBuffer.buffer);
+    packBuffer.set(finalIndexBuf, 8);
+    for (const { path, data } of processedEntries) {
+      const entry = newIndex[path];
+      packBuffer.set(data, entry.offset);
+    }
+    const content = packBuffer.subarray(8);
+    const checksum = this.useChecksum ? crc32(content) : 0;
+    view.setUint32(0, finalIndexBuf.length, true);
+    view.setUint32(4, checksum, true);
+    await this.writePackFile(packBuffer);
+    this.index = newIndex;
   }
   /**
    * Write the pack file to OPFS
@@ -954,12 +981,17 @@ var PackedStorage = class {
     const { fileHandle } = await this.handleManager.getHandle(PACK_FILE, { create: true });
     if (!fileHandle) return;
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle();
+      const releaseLock = await fileLockManager.acquire(PACK_FILE);
       try {
-        access.truncate(data.length);
-        access.write(data, { at: 0 });
+        const access = await fileHandle.createSyncAccessHandle();
+        try {
+          access.truncate(data.length);
+          access.write(data, { at: 0 });
+        } finally {
+          access.close();
+        }
       } finally {
-        access.close();
+        releaseLock();
       }
     } else {
       const writable = await fileHandle.createWritable();
@@ -972,16 +1004,16 @@ var PackedStorage = class {
    * Note: Doesn't reclaim space, just removes from index and recalculates CRC32
    */
   async remove(path) {
-    const release = await this.acquireLock();
-    try {
-      const index = await this.loadIndex();
-      if (!(path in index)) return false;
-      delete index[path];
-      const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
-      if (!fileHandle) return true;
-      const encoder = new TextEncoder();
-      const newIndexBuf = encoder.encode(JSON.stringify(index));
-      if (this.useSync) {
+    const index = await this.loadIndex();
+    if (!(path in index)) return false;
+    delete index[path];
+    const { fileHandle } = await this.handleManager.getHandle(PACK_FILE);
+    if (!fileHandle) return true;
+    const encoder = new TextEncoder();
+    const newIndexBuf = encoder.encode(JSON.stringify(index));
+    if (this.useSync) {
+      const releaseLock = await fileLockManager.acquire(PACK_FILE);
+      try {
         const access = await fileHandle.createSyncAccessHandle();
         try {
           const size = access.getSize();
@@ -1012,42 +1044,37 @@ var PackedStorage = class {
         } finally {
           access.close();
         }
-      } else {
-        const file = await fileHandle.getFile();
-        const oldData = new Uint8Array(await file.arrayBuffer());
-        if (oldData.length < 8) return true;
-        const oldIndexLen = new DataView(oldData.buffer).getUint32(0, true);
-        const dataStart = 8 + oldIndexLen;
-        const dataPortion = oldData.subarray(dataStart);
-        const newContent = new Uint8Array(newIndexBuf.length + dataPortion.length);
-        newContent.set(newIndexBuf, 0);
-        newContent.set(dataPortion, newIndexBuf.length);
-        const checksum = this.useChecksum ? crc32(newContent) : 0;
-        const newFile = new Uint8Array(8 + newContent.length);
-        const view = new DataView(newFile.buffer);
-        view.setUint32(0, newIndexBuf.length, true);
-        view.setUint32(4, checksum, true);
-        newFile.set(newContent, 8);
-        const writable = await fileHandle.createWritable();
-        await writable.write(newFile);
-        await writable.close();
+      } finally {
+        releaseLock();
       }
-      return true;
-    } finally {
-      release();
+    } else {
+      const file = await fileHandle.getFile();
+      const oldData = new Uint8Array(await file.arrayBuffer());
+      if (oldData.length < 8) return true;
+      const oldIndexLen = new DataView(oldData.buffer).getUint32(0, true);
+      const dataStart = 8 + oldIndexLen;
+      const dataPortion = oldData.subarray(dataStart);
+      const newContent = new Uint8Array(newIndexBuf.length + dataPortion.length);
+      newContent.set(newIndexBuf, 0);
+      newContent.set(dataPortion, newIndexBuf.length);
+      const checksum = this.useChecksum ? crc32(newContent) : 0;
+      const newFile = new Uint8Array(8 + newContent.length);
+      const view = new DataView(newFile.buffer);
+      view.setUint32(0, newIndexBuf.length, true);
+      view.setUint32(4, checksum, true);
+      newFile.set(newContent, 8);
+      const writable = await fileHandle.createWritable();
+      await writable.write(newFile);
+      await writable.close();
     }
+    return true;
   }
   /**
    * Check if pack file is being used (has entries)
    */
   async isEmpty() {
-    const release = await this.acquireLock();
-    try {
-      const index = await this.loadIndex();
-      return Object.keys(index).length === 0;
-    } finally {
-      release();
-    }
+    const index = await this.loadIndex();
+    return Object.keys(index).length === 0;
   }
 };
 
@@ -1283,11 +1310,19 @@ var OPFS = class {
       if (fileHandle) {
         let buffer;
         if (this.useSync) {
-          const access = await fileHandle.createSyncAccessHandle();
-          const size = access.getSize();
-          buffer = new Uint8Array(size);
-          access.read(buffer);
-          access.close();
+          const releaseLock = await fileLockManager.acquire(resolvedPath);
+          try {
+            const access = await fileHandle.createSyncAccessHandle();
+            try {
+              const size = access.getSize();
+              buffer = new Uint8Array(size);
+              access.read(buffer);
+            } finally {
+              access.close();
+            }
+          } finally {
+            releaseLock();
+          }
         } else {
           const file = await fileHandle.getFile();
           buffer = new Uint8Array(await file.arrayBuffer());
@@ -1344,11 +1379,19 @@ var OPFS = class {
               }
               let buffer;
               if (this.useSync) {
-                const access = await fileHandle.createSyncAccessHandle();
-                const size = access.getSize();
-                buffer = new Uint8Array(size);
-                access.read(buffer);
-                access.close();
+                const releaseLock = await fileLockManager.acquire(resolvedPath);
+                try {
+                  const access = await fileHandle.createSyncAccessHandle();
+                  try {
+                    const size = access.getSize();
+                    buffer = new Uint8Array(size);
+                    access.read(buffer);
+                  } finally {
+                    access.close();
+                  }
+                } finally {
+                  releaseLock();
+                }
               } else {
                 const file = await fileHandle.getFile();
                 buffer = new Uint8Array(await file.arrayBuffer());
@@ -1380,10 +1423,18 @@ var OPFS = class {
       const { fileHandle } = await this.handleManager.getHandle(resolvedPath, { create: true });
       const buffer = typeof data === "string" ? new TextEncoder().encode(data) : data;
       if (this.useSync) {
-        const access = await fileHandle.createSyncAccessHandle();
-        access.truncate(buffer.length);
-        access.write(buffer, { at: 0 });
-        access.close();
+        const releaseLock = await fileLockManager.acquire(resolvedPath);
+        try {
+          const access = await fileHandle.createSyncAccessHandle();
+          try {
+            access.truncate(buffer.length);
+            access.write(buffer, { at: 0 });
+          } finally {
+            access.close();
+          }
+        } finally {
+          releaseLock();
+        }
       } else {
         const writable = await fileHandle.createWritable();
         await writable.write(buffer);
@@ -1996,9 +2047,17 @@ var OPFS = class {
       const { fileHandle } = await this.handleManager.getHandle(resolvedPath);
       if (!fileHandle) throw createENOENT(path);
       if (this.useSync) {
-        const access = await fileHandle.createSyncAccessHandle();
-        access.truncate(len);
-        access.close();
+        const releaseLock = await fileLockManager.acquire(resolvedPath);
+        try {
+          const access = await fileHandle.createSyncAccessHandle();
+          try {
+            access.truncate(len);
+          } finally {
+            access.close();
+          }
+        } finally {
+          releaseLock();
+        }
       } else {
         const file = await fileHandle.getFile();
         const data = new Uint8Array(await file.arrayBuffer());

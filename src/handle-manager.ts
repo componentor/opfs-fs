@@ -17,6 +17,70 @@ const FILE_HANDLE_POOL_SIZE = 50
 const DIR_CACHE_MAX_SIZE = 200
 
 /**
+ * Manages file-level locks to prevent concurrent sync access handle creation.
+ * OPFS only allows one sync access handle per file at a time.
+ */
+export class FileLockManager {
+  private locks: Map<string, Promise<void>> = new Map()
+  private lockResolvers: Map<string, () => void> = new Map()
+  private waitQueues: Map<string, Array<() => void>> = new Map()
+
+  /**
+   * Acquire an exclusive lock on a file path.
+   * If the file is already locked, waits until it's released.
+   * Returns a release function that MUST be called when done.
+   */
+  async acquire(path: string): Promise<() => void> {
+    const normalizedPath = normalize(path)
+
+    // If file is currently locked, wait for it
+    while (this.locks.has(normalizedPath)) {
+      await this.locks.get(normalizedPath)
+    }
+
+    // Create new lock
+    let resolve: () => void
+    const lockPromise = new Promise<void>(r => {
+      resolve = r
+    })
+
+    this.locks.set(normalizedPath, lockPromise)
+    this.lockResolvers.set(normalizedPath, resolve!)
+
+    // Return release function
+    return () => {
+      const resolver = this.lockResolvers.get(normalizedPath)
+      this.locks.delete(normalizedPath)
+      this.lockResolvers.delete(normalizedPath)
+      if (resolver) resolver()
+    }
+  }
+
+  /**
+   * Check if a file is currently locked
+   */
+  isLocked(path: string): boolean {
+    return this.locks.has(normalize(path))
+  }
+
+  /**
+   * Clear all locks (use with caution, mainly for cleanup)
+   */
+  clearAll(): void {
+    // Resolve all pending locks
+    for (const resolver of this.lockResolvers.values()) {
+      resolver()
+    }
+    this.locks.clear()
+    this.lockResolvers.clear()
+    this.waitQueues.clear()
+  }
+}
+
+// Global file lock manager instance
+export const fileLockManager = new FileLockManager()
+
+/**
  * Manages OPFS handles with caching for improved performance
  */
 export class HandleManager {

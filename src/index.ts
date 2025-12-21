@@ -24,7 +24,7 @@ import type {
 import { constants, flagsToString } from './constants.js'
 import { createENOENT, createEEXIST, createEACCES, createEISDIR, wrapError } from './errors.js'
 import { normalize, dirname, basename, join, isRoot, segments } from './path-utils.js'
-import { HandleManager } from './handle-manager.js'
+import { HandleManager, fileLockManager } from './handle-manager.js'
 import { SymlinkManager } from './symlink-manager.js'
 import { PackedStorage } from './packed-storage.js'
 import { createFileHandle } from './file-handle.js'
@@ -187,11 +187,19 @@ export default class OPFS {
         let buffer: Uint8Array
 
         if (this.useSync) {
-          const access = await fileHandle.createSyncAccessHandle()
-          const size = access.getSize()
-          buffer = new Uint8Array(size)
-          access.read(buffer)
-          access.close()
+          const releaseLock = await fileLockManager.acquire(resolvedPath)
+          try {
+            const access = await fileHandle.createSyncAccessHandle()
+            try {
+              const size = access.getSize()
+              buffer = new Uint8Array(size)
+              access.read(buffer)
+            } finally {
+              access.close()
+            }
+          } finally {
+            releaseLock()
+          }
         } else {
           const file = await fileHandle.getFile()
           buffer = new Uint8Array(await file.arrayBuffer())
@@ -269,11 +277,19 @@ export default class OPFS {
 
               let buffer: Uint8Array
               if (this.useSync) {
-                const access = await fileHandle.createSyncAccessHandle()
-                const size = access.getSize()
-                buffer = new Uint8Array(size)
-                access.read(buffer)
-                access.close()
+                const releaseLock = await fileLockManager.acquire(resolvedPath)
+                try {
+                  const access = await fileHandle.createSyncAccessHandle()
+                  try {
+                    const size = access.getSize()
+                    buffer = new Uint8Array(size)
+                    access.read(buffer)
+                  } finally {
+                    access.close()
+                  }
+                } finally {
+                  releaseLock()
+                }
               } else {
                 const file = await fileHandle.getFile()
                 buffer = new Uint8Array(await file.arrayBuffer())
@@ -310,11 +326,19 @@ export default class OPFS {
       const buffer = typeof data === 'string' ? new TextEncoder().encode(data) : data
 
       if (this.useSync) {
-        const access = await fileHandle!.createSyncAccessHandle()
-        // Set exact size (more efficient than truncate(0) + write)
-        access.truncate(buffer.length)
-        access.write(buffer, { at: 0 })
-        access.close()
+        const releaseLock = await fileLockManager.acquire(resolvedPath)
+        try {
+          const access = await fileHandle!.createSyncAccessHandle()
+          try {
+            // Set exact size (more efficient than truncate(0) + write)
+            access.truncate(buffer.length)
+            access.write(buffer, { at: 0 })
+          } finally {
+            access.close()
+          }
+        } finally {
+          releaseLock()
+        }
       } else {
         const writable = await fileHandle!.createWritable()
         await writable.write(buffer)
@@ -1036,9 +1060,17 @@ export default class OPFS {
       if (!fileHandle) throw createENOENT(path)
 
       if (this.useSync) {
-        const access = await fileHandle.createSyncAccessHandle()
-        access.truncate(len)
-        access.close()
+        const releaseLock = await fileLockManager.acquire(resolvedPath)
+        try {
+          const access = await fileHandle.createSyncAccessHandle()
+          try {
+            access.truncate(len)
+          } finally {
+            access.close()
+          }
+        } finally {
+          releaseLock()
+        }
       } else {
         const file = await fileHandle.getFile()
         const data = new Uint8Array(await file.arrayBuffer())

@@ -2,11 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.5] - 2025-12-21
+
+### Fixed
+- Removed double locking in packed-storage.ts for better performance
+- Fixed missing try/finally for access.close() in index.ts to prevent resource leaks
+
 ## [1.2.4] - 2025-12-20
 
 ### Fixed
 - Fixed concurrent access error "Access Handles cannot be created if there is another open Access Handle"
-- Added lock mechanism to prevent concurrent pack file access
+- Added FileLockManager to prevent concurrent sync access handle creation
 - Added try/finally blocks to ensure sync access handles are always closed
 
 ### Added
