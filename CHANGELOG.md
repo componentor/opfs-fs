@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.7] - 2025-12-24
+
+### Changed
+- Optimized file lock for uncontended case (no Promise creation when lock is free)
+- Faster pack file operations with reduced locking overhead
+
 ## [1.2.6] - 2025-12-24
 
 ### Fixed
-- Removed FileLockManager - was causing severe performance degradation
-- Hybrid mode already prevents conflicts by using async APIs on main thread (useSync: false)
-- No locking needed since sync access handles are only used by one context at a time
+- Fixed concurrent access error within same context (e.g., concurrent batch writes)
+- Added simple in-memory file lock for sync access handle serialization
+- Fast locking (no Web Locks overhead) that only serializes access to the same file
+
+### Added
+- 4 new concurrent access tests (218 total tests)
 
 ## [1.2.5] - 2025-12-21
 

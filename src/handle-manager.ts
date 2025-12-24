@@ -17,6 +17,58 @@ const FILE_HANDLE_POOL_SIZE = 50
 const DIR_CACHE_MAX_SIZE = 200
 
 /**
+ * Simple in-memory lock for preventing concurrent sync access handle creation
+ * within the same JavaScript context. This is needed because sync access handles
+ * are exclusive per file - only one can exist at a time.
+ *
+ * Optimized for the uncontended case (no Promise creation when lock is free).
+ */
+class FileLock {
+  private active = new Set<string>()
+  private queues = new Map<string, Array<() => void>>()
+
+  async acquire(path: string): Promise<() => void> {
+    if (!this.active.has(path)) {
+      // Fast path: no contention, just mark as active
+      this.active.add(path)
+      return this.createRelease(path)
+    }
+
+    // Slow path: wait in queue
+    await new Promise<void>(resolve => {
+      let queue = this.queues.get(path)
+      if (!queue) {
+        queue = []
+        this.queues.set(path, queue)
+      }
+      queue.push(resolve)
+    })
+
+    return this.createRelease(path)
+  }
+
+  private createRelease(path: string): () => void {
+    return () => {
+      const queue = this.queues.get(path)
+      if (queue && queue.length > 0) {
+        // Pass ownership to next waiter
+        const next = queue.shift()!
+        if (queue.length === 0) {
+          this.queues.delete(path)
+        }
+        next()
+      } else {
+        // No waiters, release the lock
+        this.active.delete(path)
+      }
+    }
+  }
+}
+
+/** Global file lock instance for sync access handle serialization */
+export const fileLock = new FileLock()
+
+/**
  * Manages OPFS handles with caching for improved performance
  */
 export class HandleManager {

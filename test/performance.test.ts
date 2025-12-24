@@ -325,4 +325,100 @@ describe('Performance Benchmarks', () => {
       expect(duDuration).toBeLessThan(500)
     })
   })
+
+  describe('Concurrent Access', () => {
+    it('should handle concurrent batch writes without errors', async () => {
+      // This tests the file lock prevents "Access Handles cannot be created" errors
+      // Note: writeFileBatch replaces the pack file, so only the last batch's data survives
+      const batch1 = Array.from({ length: 10 }, (_, i) => ({
+        path: `/batch1/file${i}.txt`,
+        data: `content1-${i}`
+      }))
+      const batch2 = Array.from({ length: 10 }, (_, i) => ({
+        path: `/batch2/file${i}.txt`,
+        data: `content2-${i}`
+      }))
+      const batch3 = Array.from({ length: 10 }, (_, i) => ({
+        path: `/batch3/file${i}.txt`,
+        data: `content3-${i}`
+      }))
+
+      // Run all batch writes concurrently - they all access the pack file
+      // The key test is that this doesn't throw "Access Handles cannot be created" error
+      const results = await Promise.allSettled([
+        fs.writeFileBatch(batch1),
+        fs.writeFileBatch(batch2),
+        fs.writeFileBatch(batch3)
+      ])
+
+      // All should succeed (no sync access handle conflicts)
+      expect(results[0].status).toBe('fulfilled')
+      expect(results[1].status).toBe('fulfilled')
+      expect(results[2].status).toBe('fulfilled')
+    })
+
+    it('should handle concurrent batch reads without errors', async () => {
+      // Setup: write files first
+      const files = Array.from({ length: 30 }, (_, i) => ({
+        path: `/concurrent/file${i}.txt`,
+        data: `content-${i}`
+      }))
+      await fs.writeFileBatch(files)
+
+      // Read the same files concurrently from multiple "readers"
+      const paths = files.map(f => f.path)
+      const [results1, results2, results3] = await Promise.all([
+        fs.readFileBatch(paths),
+        fs.readFileBatch(paths),
+        fs.readFileBatch(paths)
+      ])
+
+      // All should succeed
+      expect(results1.every(r => r.data !== null)).toBe(true)
+      expect(results2.every(r => r.data !== null)).toBe(true)
+      expect(results3.every(r => r.data !== null)).toBe(true)
+    })
+
+    it('should handle concurrent read and write to pack file', async () => {
+      // Setup initial data
+      const initialFiles = Array.from({ length: 10 }, (_, i) => ({
+        path: `/mixed/file${i}.txt`,
+        data: `initial-${i}`
+      }))
+      await fs.writeFileBatch(initialFiles)
+
+      // Concurrent reads and writes to pack file
+      const newFiles = Array.from({ length: 10 }, (_, i) => ({
+        path: `/mixed/new${i}.txt`,
+        data: `new-${i}`
+      }))
+
+      const [writeResult, readResult] = await Promise.allSettled([
+        fs.writeFileBatch(newFiles),
+        fs.readFileBatch(initialFiles.map(f => f.path))
+      ])
+
+      // Both should succeed (not throw "Access Handles" error)
+      expect(writeResult.status).toBe('fulfilled')
+      expect(readResult.status).toBe('fulfilled')
+    })
+
+    it('should handle many concurrent symlink operations', async () => {
+      // Create target files
+      for (let i = 0; i < 20; i++) {
+        await fs.writeFile(`/target${i}.txt`, `target-${i}`)
+      }
+
+      // Create symlinks concurrently
+      const symlinkPromises = Array.from({ length: 20 }, (_, i) =>
+        fs.symlink(`/target${i}.txt`, `/symlink${i}.txt`)
+      )
+
+      await Promise.all(symlinkPromises)
+
+      // Verify symlinks work
+      const content = await fs.readFile('/symlink0.txt', { encoding: 'utf-8' })
+      expect(content).toBe('target-0')
+    })
+  })
 })

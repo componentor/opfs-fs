@@ -145,6 +145,40 @@ function segments(path) {
 // src/handle-manager.ts
 var FILE_HANDLE_POOL_SIZE = 50;
 var DIR_CACHE_MAX_SIZE = 200;
+var FileLock = class {
+  active = /* @__PURE__ */ new Set();
+  queues = /* @__PURE__ */ new Map();
+  async acquire(path) {
+    if (!this.active.has(path)) {
+      this.active.add(path);
+      return this.createRelease(path);
+    }
+    await new Promise((resolve) => {
+      let queue = this.queues.get(path);
+      if (!queue) {
+        queue = [];
+        this.queues.set(path, queue);
+      }
+      queue.push(resolve);
+    });
+    return this.createRelease(path);
+  }
+  createRelease(path) {
+    return () => {
+      const queue = this.queues.get(path);
+      if (queue && queue.length > 0) {
+        const next = queue.shift();
+        if (queue.length === 0) {
+          this.queues.delete(path);
+        }
+        next();
+      } else {
+        this.active.delete(path);
+      }
+    };
+  }
+};
+var fileLock = new FileLock();
 var HandleManager = class {
   rootPromise;
   dirCache = /* @__PURE__ */ new Map();
@@ -402,15 +436,20 @@ var SymlinkManager = class {
     if (!fileHandle) return;
     const buffer = new TextEncoder().encode(data);
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle();
+      const release = await fileLock.acquire(SYMLINK_FILE);
       try {
-        access.truncate(0);
-        let written = 0;
-        while (written < buffer.length) {
-          written += access.write(buffer.subarray(written), { at: written });
+        const access = await fileHandle.createSyncAccessHandle();
+        try {
+          access.truncate(0);
+          let written = 0;
+          while (written < buffer.length) {
+            written += access.write(buffer.subarray(written), { at: written });
+          }
+        } finally {
+          access.close();
         }
       } finally {
-        access.close();
+        release();
       }
     } else {
       const writable = await fileHandle.createWritable();
@@ -693,30 +732,35 @@ var PackedStorage = class {
         return {};
       }
       if (this.useSync) {
-        const access = await fileHandle.createSyncAccessHandle();
+        const release = await fileLock.acquire(PACK_FILE);
         try {
-          const size = access.getSize();
-          if (size < 8) {
-            return {};
-          }
-          const header = new Uint8Array(8);
-          access.read(header, { at: 0 });
-          const view = new DataView(header.buffer);
-          const indexLen = view.getUint32(0, true);
-          const storedCrc = view.getUint32(4, true);
-          const contentSize = size - 8;
-          const content = new Uint8Array(contentSize);
-          access.read(content, { at: 8 });
-          if (this.useChecksum && storedCrc !== 0) {
-            const calculatedCrc = crc32(content);
-            if (calculatedCrc !== storedCrc) {
-              throw createECORRUPTED(PACK_FILE);
+          const access = await fileHandle.createSyncAccessHandle();
+          try {
+            const size = access.getSize();
+            if (size < 8) {
+              return {};
             }
+            const header = new Uint8Array(8);
+            access.read(header, { at: 0 });
+            const view = new DataView(header.buffer);
+            const indexLen = view.getUint32(0, true);
+            const storedCrc = view.getUint32(4, true);
+            const contentSize = size - 8;
+            const content = new Uint8Array(contentSize);
+            access.read(content, { at: 8 });
+            if (this.useChecksum && storedCrc !== 0) {
+              const calculatedCrc = crc32(content);
+              if (calculatedCrc !== storedCrc) {
+                throw createECORRUPTED(PACK_FILE);
+              }
+            }
+            const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
+            return JSON.parse(indexJson);
+          } finally {
+            access.close();
           }
-          const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
-          return JSON.parse(indexJson);
         } finally {
-          access.close();
+          release();
         }
       } else {
         const file = await fileHandle.getFile();
@@ -770,12 +814,17 @@ var PackedStorage = class {
     if (!fileHandle) return null;
     let buffer;
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle();
+      const release = await fileLock.acquire(PACK_FILE);
       try {
-        buffer = new Uint8Array(entry.size);
-        access.read(buffer, { at: entry.offset });
+        const access = await fileHandle.createSyncAccessHandle();
+        try {
+          buffer = new Uint8Array(entry.size);
+          access.read(buffer, { at: entry.offset });
+        } finally {
+          access.close();
+        }
       } finally {
-        access.close();
+        release();
       }
     } else {
       const file = await fileHandle.getFile();
@@ -815,19 +864,24 @@ var PackedStorage = class {
     }
     const decompressPromises = [];
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle();
+      const release = await fileLock.acquire(PACK_FILE);
       try {
-        for (const { path, offset, size, originalSize } of toRead) {
-          const buffer = new Uint8Array(size);
-          access.read(buffer, { at: offset });
-          if (originalSize !== void 0) {
-            decompressPromises.push({ path, promise: decompress(buffer) });
-          } else {
-            results.set(path, buffer);
+        const access = await fileHandle.createSyncAccessHandle();
+        try {
+          for (const { path, offset, size, originalSize } of toRead) {
+            const buffer = new Uint8Array(size);
+            access.read(buffer, { at: offset });
+            if (originalSize !== void 0) {
+              decompressPromises.push({ path, promise: decompress(buffer) });
+            } else {
+              results.set(path, buffer);
+            }
           }
+        } finally {
+          access.close();
         }
       } finally {
-        access.close();
+        release();
       }
     } else {
       const file = await fileHandle.getFile();
@@ -915,12 +969,17 @@ var PackedStorage = class {
     const { fileHandle } = await this.handleManager.getHandle(PACK_FILE, { create: true });
     if (!fileHandle) return;
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle();
+      const release = await fileLock.acquire(PACK_FILE);
       try {
-        access.truncate(data.length);
-        access.write(data, { at: 0 });
+        const access = await fileHandle.createSyncAccessHandle();
+        try {
+          access.truncate(data.length);
+          access.write(data, { at: 0 });
+        } finally {
+          access.close();
+        }
       } finally {
-        access.close();
+        release();
       }
     } else {
       const writable = await fileHandle.createWritable();
@@ -941,35 +1000,40 @@ var PackedStorage = class {
     const encoder = new TextEncoder();
     const newIndexBuf = encoder.encode(JSON.stringify(index));
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle();
+      const release = await fileLock.acquire(PACK_FILE);
       try {
-        const size = access.getSize();
-        const oldHeader = new Uint8Array(8);
-        access.read(oldHeader, { at: 0 });
-        const oldIndexLen = new DataView(oldHeader.buffer).getUint32(0, true);
-        const dataStart = 8 + oldIndexLen;
-        const dataSize = size - dataStart;
-        const dataPortion = new Uint8Array(dataSize);
-        if (dataSize > 0) {
-          access.read(dataPortion, { at: dataStart });
+        const access = await fileHandle.createSyncAccessHandle();
+        try {
+          const size = access.getSize();
+          const oldHeader = new Uint8Array(8);
+          access.read(oldHeader, { at: 0 });
+          const oldIndexLen = new DataView(oldHeader.buffer).getUint32(0, true);
+          const dataStart = 8 + oldIndexLen;
+          const dataSize = size - dataStart;
+          const dataPortion = new Uint8Array(dataSize);
+          if (dataSize > 0) {
+            access.read(dataPortion, { at: dataStart });
+          }
+          const newContent = new Uint8Array(newIndexBuf.length + dataSize);
+          newContent.set(newIndexBuf, 0);
+          if (dataSize > 0) {
+            newContent.set(dataPortion, newIndexBuf.length);
+          }
+          const checksum = this.useChecksum ? crc32(newContent) : 0;
+          const newHeader = new Uint8Array(8);
+          const view = new DataView(newHeader.buffer);
+          view.setUint32(0, newIndexBuf.length, true);
+          view.setUint32(4, checksum, true);
+          const newFile = new Uint8Array(8 + newContent.length);
+          newFile.set(newHeader, 0);
+          newFile.set(newContent, 8);
+          access.truncate(newFile.length);
+          access.write(newFile, { at: 0 });
+        } finally {
+          access.close();
         }
-        const newContent = new Uint8Array(newIndexBuf.length + dataSize);
-        newContent.set(newIndexBuf, 0);
-        if (dataSize > 0) {
-          newContent.set(dataPortion, newIndexBuf.length);
-        }
-        const checksum = this.useChecksum ? crc32(newContent) : 0;
-        const newHeader = new Uint8Array(8);
-        const view = new DataView(newHeader.buffer);
-        view.setUint32(0, newIndexBuf.length, true);
-        view.setUint32(4, checksum, true);
-        const newFile = new Uint8Array(8 + newContent.length);
-        newFile.set(newHeader, 0);
-        newFile.set(newContent, 8);
-        access.truncate(newFile.length);
-        access.write(newFile, { at: 0 });
       } finally {
-        access.close();
+        release();
       }
     } else {
       const file = await fileHandle.getFile();

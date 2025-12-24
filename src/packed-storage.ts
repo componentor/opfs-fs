@@ -15,6 +15,7 @@
  */
 
 import type { HandleManager } from './handle-manager.js'
+import { fileLock } from './handle-manager.js'
 import { createECORRUPTED } from './errors.js'
 
 // ============ Compression ============
@@ -173,38 +174,43 @@ export class PackedStorage {
       }
 
       if (this.useSync) {
-        const access = await fileHandle.createSyncAccessHandle()
+        const release = await fileLock.acquire(PACK_FILE)
         try {
-          const size = access.getSize()
-          if (size < 8) {
-            return {}
-          }
-
-          // Read header: index length + CRC32
-          const header = new Uint8Array(8)
-          access.read(header, { at: 0 })
-          const view = new DataView(header.buffer)
-          const indexLen = view.getUint32(0, true)
-          const storedCrc = view.getUint32(4, true)
-
-          // Read everything after header (index + data) for CRC verification
-          const contentSize = size - 8
-          const content = new Uint8Array(contentSize)
-          access.read(content, { at: 8 })
-
-          // Verify CRC32 if enabled
-          if (this.useChecksum && storedCrc !== 0) {
-            const calculatedCrc = crc32(content)
-            if (calculatedCrc !== storedCrc) {
-              throw createECORRUPTED(PACK_FILE)
+          const access = await fileHandle.createSyncAccessHandle()
+          try {
+            const size = access.getSize()
+            if (size < 8) {
+              return {}
             }
-          }
 
-          // Parse index from content
-          const indexJson = new TextDecoder().decode(content.subarray(0, indexLen))
-          return JSON.parse(indexJson)
+            // Read header: index length + CRC32
+            const header = new Uint8Array(8)
+            access.read(header, { at: 0 })
+            const view = new DataView(header.buffer)
+            const indexLen = view.getUint32(0, true)
+            const storedCrc = view.getUint32(4, true)
+
+            // Read everything after header (index + data) for CRC verification
+            const contentSize = size - 8
+            const content = new Uint8Array(contentSize)
+            access.read(content, { at: 8 })
+
+            // Verify CRC32 if enabled
+            if (this.useChecksum && storedCrc !== 0) {
+              const calculatedCrc = crc32(content)
+              if (calculatedCrc !== storedCrc) {
+                throw createECORRUPTED(PACK_FILE)
+              }
+            }
+
+            // Parse index from content
+            const indexJson = new TextDecoder().decode(content.subarray(0, indexLen))
+            return JSON.parse(indexJson)
+          } finally {
+            access.close()
+          }
         } finally {
-          access.close()
+          release()
         }
       } else {
         const file = await fileHandle.getFile()
@@ -268,12 +274,17 @@ export class PackedStorage {
     let buffer: Uint8Array
 
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle()
+      const release = await fileLock.acquire(PACK_FILE)
       try {
-        buffer = new Uint8Array(entry.size)
-        access.read(buffer, { at: entry.offset })
+        const access = await fileHandle.createSyncAccessHandle()
+        try {
+          buffer = new Uint8Array(entry.size)
+          access.read(buffer, { at: entry.offset })
+        } finally {
+          access.close()
+        }
       } finally {
-        access.close()
+        release()
       }
     } else {
       const file = await fileHandle.getFile()
@@ -325,21 +336,26 @@ export class PackedStorage {
     const decompressPromises: Array<{ path: string; promise: Promise<Uint8Array> }> = []
 
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle()
+      const release = await fileLock.acquire(PACK_FILE)
       try {
-        for (const { path, offset, size, originalSize } of toRead) {
-          const buffer = new Uint8Array(size)
-          access.read(buffer, { at: offset })
+        const access = await fileHandle.createSyncAccessHandle()
+        try {
+          for (const { path, offset, size, originalSize } of toRead) {
+            const buffer = new Uint8Array(size)
+            access.read(buffer, { at: offset })
 
-          if (originalSize !== undefined) {
-            // Queue for decompression
-            decompressPromises.push({ path, promise: decompress(buffer) })
-          } else {
-            results.set(path, buffer)
+            if (originalSize !== undefined) {
+              // Queue for decompression
+              decompressPromises.push({ path, promise: decompress(buffer) })
+            } else {
+              results.set(path, buffer)
+            }
           }
+        } finally {
+          access.close()
         }
       } finally {
-        access.close()
+        release()
       }
     } else {
       const file = await fileHandle.getFile()
@@ -459,12 +475,17 @@ export class PackedStorage {
     if (!fileHandle) return
 
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle()
+      const release = await fileLock.acquire(PACK_FILE)
       try {
-        access.truncate(data.length)
-        access.write(data, { at: 0 })
+        const access = await fileHandle.createSyncAccessHandle()
+        try {
+          access.truncate(data.length)
+          access.write(data, { at: 0 })
+        } finally {
+          access.close()
+        }
       } finally {
-        access.close()
+        release()
       }
     } else {
       const writable = await fileHandle.createWritable()
@@ -491,48 +512,53 @@ export class PackedStorage {
     const newIndexBuf = encoder.encode(JSON.stringify(index))
 
     if (this.useSync) {
-      const access = await fileHandle.createSyncAccessHandle()
+      const release = await fileLock.acquire(PACK_FILE)
       try {
-        const size = access.getSize()
+        const access = await fileHandle.createSyncAccessHandle()
+        try {
+          const size = access.getSize()
 
-        // Read old header to get old index length
-        const oldHeader = new Uint8Array(8)
-        access.read(oldHeader, { at: 0 })
-        const oldIndexLen = new DataView(oldHeader.buffer).getUint32(0, true)
+          // Read old header to get old index length
+          const oldHeader = new Uint8Array(8)
+          access.read(oldHeader, { at: 0 })
+          const oldIndexLen = new DataView(oldHeader.buffer).getUint32(0, true)
 
-        // Read data portion (after old index)
-        const dataStart = 8 + oldIndexLen
-        const dataSize = size - dataStart
-        const dataPortion = new Uint8Array(dataSize)
-        if (dataSize > 0) {
-          access.read(dataPortion, { at: dataStart })
+          // Read data portion (after old index)
+          const dataStart = 8 + oldIndexLen
+          const dataSize = size - dataStart
+          const dataPortion = new Uint8Array(dataSize)
+          if (dataSize > 0) {
+            access.read(dataPortion, { at: dataStart })
+          }
+
+          // Build new content (new index + data)
+          const newContent = new Uint8Array(newIndexBuf.length + dataSize)
+          newContent.set(newIndexBuf, 0)
+          if (dataSize > 0) {
+            newContent.set(dataPortion, newIndexBuf.length)
+          }
+
+          // Calculate new CRC32 if enabled
+          const checksum = this.useChecksum ? crc32(newContent) : 0
+
+          // Build new header
+          const newHeader = new Uint8Array(8)
+          const view = new DataView(newHeader.buffer)
+          view.setUint32(0, newIndexBuf.length, true)
+          view.setUint32(4, checksum, true)
+
+          // Write new file
+          const newFile = new Uint8Array(8 + newContent.length)
+          newFile.set(newHeader, 0)
+          newFile.set(newContent, 8)
+
+          access.truncate(newFile.length)
+          access.write(newFile, { at: 0 })
+        } finally {
+          access.close()
         }
-
-        // Build new content (new index + data)
-        const newContent = new Uint8Array(newIndexBuf.length + dataSize)
-        newContent.set(newIndexBuf, 0)
-        if (dataSize > 0) {
-          newContent.set(dataPortion, newIndexBuf.length)
-        }
-
-        // Calculate new CRC32 if enabled
-        const checksum = this.useChecksum ? crc32(newContent) : 0
-
-        // Build new header
-        const newHeader = new Uint8Array(8)
-        const view = new DataView(newHeader.buffer)
-        view.setUint32(0, newIndexBuf.length, true)
-        view.setUint32(4, checksum, true)
-
-        // Write new file
-        const newFile = new Uint8Array(8 + newContent.length)
-        newFile.set(newHeader, 0)
-        newFile.set(newContent, 8)
-
-        access.truncate(newFile.length)
-        access.write(newFile, { at: 0 })
       } finally {
-        access.close()
+        release()
       }
     } else {
       // For non-sync, rewrite the whole file
