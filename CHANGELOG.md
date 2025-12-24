@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.8] - 2025-12-24
+
+### Changed
+- File locking only for shared resources (pack file, symlink file) - no locking overhead for regular file operations
+
 ## [1.2.7] - 2025-12-24
 
 ### Changed
