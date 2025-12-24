@@ -145,52 +145,6 @@ function segments(path) {
 // src/handle-manager.ts
 var FILE_HANDLE_POOL_SIZE = 50;
 var DIR_CACHE_MAX_SIZE = 200;
-var FileLockManager = class {
-  locks = /* @__PURE__ */ new Map();
-  lockResolvers = /* @__PURE__ */ new Map();
-  waitQueues = /* @__PURE__ */ new Map();
-  /**
-   * Acquire an exclusive lock on a file path.
-   * If the file is already locked, waits until it's released.
-   * Returns a release function that MUST be called when done.
-   */
-  async acquire(path) {
-    const normalizedPath = normalize(path);
-    while (this.locks.has(normalizedPath)) {
-      await this.locks.get(normalizedPath);
-    }
-    let resolve;
-    const lockPromise = new Promise((r) => {
-      resolve = r;
-    });
-    this.locks.set(normalizedPath, lockPromise);
-    this.lockResolvers.set(normalizedPath, resolve);
-    return () => {
-      const resolver = this.lockResolvers.get(normalizedPath);
-      this.locks.delete(normalizedPath);
-      this.lockResolvers.delete(normalizedPath);
-      if (resolver) resolver();
-    };
-  }
-  /**
-   * Check if a file is currently locked
-   */
-  isLocked(path) {
-    return this.locks.has(normalize(path));
-  }
-  /**
-   * Clear all locks (use with caution, mainly for cleanup)
-   */
-  clearAll() {
-    for (const resolver of this.lockResolvers.values()) {
-      resolver();
-    }
-    this.locks.clear();
-    this.lockResolvers.clear();
-    this.waitQueues.clear();
-  }
-};
-var fileLockManager = new FileLockManager();
 var HandleManager = class {
   rootPromise;
   dirCache = /* @__PURE__ */ new Map();
@@ -448,20 +402,15 @@ var SymlinkManager = class {
     if (!fileHandle) return;
     const buffer = new TextEncoder().encode(data);
     if (this.useSync) {
-      const releaseLock = await fileLockManager.acquire(SYMLINK_FILE);
+      const access = await fileHandle.createSyncAccessHandle();
       try {
-        const access = await fileHandle.createSyncAccessHandle();
-        try {
-          access.truncate(0);
-          let written = 0;
-          while (written < buffer.length) {
-            written += access.write(buffer.subarray(written), { at: written });
-          }
-        } finally {
-          access.close();
+        access.truncate(0);
+        let written = 0;
+        while (written < buffer.length) {
+          written += access.write(buffer.subarray(written), { at: written });
         }
       } finally {
-        releaseLock();
+        access.close();
       }
     } else {
       const writable = await fileHandle.createWritable();
@@ -744,35 +693,30 @@ var PackedStorage = class {
         return {};
       }
       if (this.useSync) {
-        const releaseLock = await fileLockManager.acquire(PACK_FILE);
+        const access = await fileHandle.createSyncAccessHandle();
         try {
-          const access = await fileHandle.createSyncAccessHandle();
-          try {
-            const size = access.getSize();
-            if (size < 8) {
-              return {};
-            }
-            const header = new Uint8Array(8);
-            access.read(header, { at: 0 });
-            const view = new DataView(header.buffer);
-            const indexLen = view.getUint32(0, true);
-            const storedCrc = view.getUint32(4, true);
-            const contentSize = size - 8;
-            const content = new Uint8Array(contentSize);
-            access.read(content, { at: 8 });
-            if (this.useChecksum && storedCrc !== 0) {
-              const calculatedCrc = crc32(content);
-              if (calculatedCrc !== storedCrc) {
-                throw createECORRUPTED(PACK_FILE);
-              }
-            }
-            const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
-            return JSON.parse(indexJson);
-          } finally {
-            access.close();
+          const size = access.getSize();
+          if (size < 8) {
+            return {};
           }
+          const header = new Uint8Array(8);
+          access.read(header, { at: 0 });
+          const view = new DataView(header.buffer);
+          const indexLen = view.getUint32(0, true);
+          const storedCrc = view.getUint32(4, true);
+          const contentSize = size - 8;
+          const content = new Uint8Array(contentSize);
+          access.read(content, { at: 8 });
+          if (this.useChecksum && storedCrc !== 0) {
+            const calculatedCrc = crc32(content);
+            if (calculatedCrc !== storedCrc) {
+              throw createECORRUPTED(PACK_FILE);
+            }
+          }
+          const indexJson = new TextDecoder().decode(content.subarray(0, indexLen));
+          return JSON.parse(indexJson);
         } finally {
-          releaseLock();
+          access.close();
         }
       } else {
         const file = await fileHandle.getFile();
@@ -826,17 +770,12 @@ var PackedStorage = class {
     if (!fileHandle) return null;
     let buffer;
     if (this.useSync) {
-      const releaseLock = await fileLockManager.acquire(PACK_FILE);
+      const access = await fileHandle.createSyncAccessHandle();
       try {
-        const access = await fileHandle.createSyncAccessHandle();
-        try {
-          buffer = new Uint8Array(entry.size);
-          access.read(buffer, { at: entry.offset });
-        } finally {
-          access.close();
-        }
+        buffer = new Uint8Array(entry.size);
+        access.read(buffer, { at: entry.offset });
       } finally {
-        releaseLock();
+        access.close();
       }
     } else {
       const file = await fileHandle.getFile();
@@ -876,24 +815,19 @@ var PackedStorage = class {
     }
     const decompressPromises = [];
     if (this.useSync) {
-      const releaseLock = await fileLockManager.acquire(PACK_FILE);
+      const access = await fileHandle.createSyncAccessHandle();
       try {
-        const access = await fileHandle.createSyncAccessHandle();
-        try {
-          for (const { path, offset, size, originalSize } of toRead) {
-            const buffer = new Uint8Array(size);
-            access.read(buffer, { at: offset });
-            if (originalSize !== void 0) {
-              decompressPromises.push({ path, promise: decompress(buffer) });
-            } else {
-              results.set(path, buffer);
-            }
+        for (const { path, offset, size, originalSize } of toRead) {
+          const buffer = new Uint8Array(size);
+          access.read(buffer, { at: offset });
+          if (originalSize !== void 0) {
+            decompressPromises.push({ path, promise: decompress(buffer) });
+          } else {
+            results.set(path, buffer);
           }
-        } finally {
-          access.close();
         }
       } finally {
-        releaseLock();
+        access.close();
       }
     } else {
       const file = await fileHandle.getFile();
@@ -981,17 +915,12 @@ var PackedStorage = class {
     const { fileHandle } = await this.handleManager.getHandle(PACK_FILE, { create: true });
     if (!fileHandle) return;
     if (this.useSync) {
-      const releaseLock = await fileLockManager.acquire(PACK_FILE);
+      const access = await fileHandle.createSyncAccessHandle();
       try {
-        const access = await fileHandle.createSyncAccessHandle();
-        try {
-          access.truncate(data.length);
-          access.write(data, { at: 0 });
-        } finally {
-          access.close();
-        }
+        access.truncate(data.length);
+        access.write(data, { at: 0 });
       } finally {
-        releaseLock();
+        access.close();
       }
     } else {
       const writable = await fileHandle.createWritable();
@@ -1012,40 +941,35 @@ var PackedStorage = class {
     const encoder = new TextEncoder();
     const newIndexBuf = encoder.encode(JSON.stringify(index));
     if (this.useSync) {
-      const releaseLock = await fileLockManager.acquire(PACK_FILE);
+      const access = await fileHandle.createSyncAccessHandle();
       try {
-        const access = await fileHandle.createSyncAccessHandle();
-        try {
-          const size = access.getSize();
-          const oldHeader = new Uint8Array(8);
-          access.read(oldHeader, { at: 0 });
-          const oldIndexLen = new DataView(oldHeader.buffer).getUint32(0, true);
-          const dataStart = 8 + oldIndexLen;
-          const dataSize = size - dataStart;
-          const dataPortion = new Uint8Array(dataSize);
-          if (dataSize > 0) {
-            access.read(dataPortion, { at: dataStart });
-          }
-          const newContent = new Uint8Array(newIndexBuf.length + dataSize);
-          newContent.set(newIndexBuf, 0);
-          if (dataSize > 0) {
-            newContent.set(dataPortion, newIndexBuf.length);
-          }
-          const checksum = this.useChecksum ? crc32(newContent) : 0;
-          const newHeader = new Uint8Array(8);
-          const view = new DataView(newHeader.buffer);
-          view.setUint32(0, newIndexBuf.length, true);
-          view.setUint32(4, checksum, true);
-          const newFile = new Uint8Array(8 + newContent.length);
-          newFile.set(newHeader, 0);
-          newFile.set(newContent, 8);
-          access.truncate(newFile.length);
-          access.write(newFile, { at: 0 });
-        } finally {
-          access.close();
+        const size = access.getSize();
+        const oldHeader = new Uint8Array(8);
+        access.read(oldHeader, { at: 0 });
+        const oldIndexLen = new DataView(oldHeader.buffer).getUint32(0, true);
+        const dataStart = 8 + oldIndexLen;
+        const dataSize = size - dataStart;
+        const dataPortion = new Uint8Array(dataSize);
+        if (dataSize > 0) {
+          access.read(dataPortion, { at: dataStart });
         }
+        const newContent = new Uint8Array(newIndexBuf.length + dataSize);
+        newContent.set(newIndexBuf, 0);
+        if (dataSize > 0) {
+          newContent.set(dataPortion, newIndexBuf.length);
+        }
+        const checksum = this.useChecksum ? crc32(newContent) : 0;
+        const newHeader = new Uint8Array(8);
+        const view = new DataView(newHeader.buffer);
+        view.setUint32(0, newIndexBuf.length, true);
+        view.setUint32(4, checksum, true);
+        const newFile = new Uint8Array(8 + newContent.length);
+        newFile.set(newHeader, 0);
+        newFile.set(newContent, 8);
+        access.truncate(newFile.length);
+        access.write(newFile, { at: 0 });
       } finally {
-        releaseLock();
+        access.close();
       }
     } else {
       const file = await fileHandle.getFile();
@@ -1716,18 +1640,13 @@ var OPFS = class {
       if (fileHandle) {
         let buffer;
         if (this.useSync) {
-          const releaseLock = await fileLockManager.acquire(resolvedPath);
+          const access = await fileHandle.createSyncAccessHandle();
           try {
-            const access = await fileHandle.createSyncAccessHandle();
-            try {
-              const size = access.getSize();
-              buffer = new Uint8Array(size);
-              access.read(buffer);
-            } finally {
-              access.close();
-            }
+            const size = access.getSize();
+            buffer = new Uint8Array(size);
+            access.read(buffer);
           } finally {
-            releaseLock();
+            access.close();
           }
         } else {
           const file = await fileHandle.getFile();
@@ -1785,18 +1704,13 @@ var OPFS = class {
               }
               let buffer;
               if (this.useSync) {
-                const releaseLock = await fileLockManager.acquire(resolvedPath);
+                const access = await fileHandle.createSyncAccessHandle();
                 try {
-                  const access = await fileHandle.createSyncAccessHandle();
-                  try {
-                    const size = access.getSize();
-                    buffer = new Uint8Array(size);
-                    access.read(buffer);
-                  } finally {
-                    access.close();
-                  }
+                  const size = access.getSize();
+                  buffer = new Uint8Array(size);
+                  access.read(buffer);
                 } finally {
-                  releaseLock();
+                  access.close();
                 }
               } else {
                 const file = await fileHandle.getFile();
@@ -1829,17 +1743,12 @@ var OPFS = class {
       const { fileHandle } = await this.handleManager.getHandle(resolvedPath, { create: true });
       const buffer = typeof data === "string" ? new TextEncoder().encode(data) : data;
       if (this.useSync) {
-        const releaseLock = await fileLockManager.acquire(resolvedPath);
+        const access = await fileHandle.createSyncAccessHandle();
         try {
-          const access = await fileHandle.createSyncAccessHandle();
-          try {
-            access.truncate(buffer.length);
-            access.write(buffer, { at: 0 });
-          } finally {
-            access.close();
-          }
+          access.truncate(buffer.length);
+          access.write(buffer, { at: 0 });
         } finally {
-          releaseLock();
+          access.close();
         }
       } else {
         const writable = await fileHandle.createWritable();
@@ -2453,16 +2362,11 @@ var OPFS = class {
       const { fileHandle } = await this.handleManager.getHandle(resolvedPath);
       if (!fileHandle) throw createENOENT(path);
       if (this.useSync) {
-        const releaseLock = await fileLockManager.acquire(resolvedPath);
+        const access = await fileHandle.createSyncAccessHandle();
         try {
-          const access = await fileHandle.createSyncAccessHandle();
-          try {
-            access.truncate(len);
-          } finally {
-            access.close();
-          }
+          access.truncate(len);
         } finally {
-          releaseLock();
+          access.close();
         }
       } else {
         const file = await fileHandle.getFile();

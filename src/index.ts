@@ -24,7 +24,7 @@ import type {
 import { constants, flagsToString } from './constants.js'
 import { createENOENT, createEEXIST, createEACCES, createEISDIR, wrapError } from './errors.js'
 import { normalize, dirname, basename, join, isRoot, segments } from './path-utils.js'
-import { HandleManager, fileLockManager } from './handle-manager.js'
+import { HandleManager } from './handle-manager.js'
 import { SymlinkManager } from './symlink-manager.js'
 import { PackedStorage } from './packed-storage.js'
 import { createFileHandle } from './file-handle.js'
@@ -187,18 +187,13 @@ export default class OPFS {
         let buffer: Uint8Array
 
         if (this.useSync) {
-          const releaseLock = await fileLockManager.acquire(resolvedPath)
+          const access = await fileHandle.createSyncAccessHandle()
           try {
-            const access = await fileHandle.createSyncAccessHandle()
-            try {
-              const size = access.getSize()
-              buffer = new Uint8Array(size)
-              access.read(buffer)
-            } finally {
-              access.close()
-            }
+            const size = access.getSize()
+            buffer = new Uint8Array(size)
+            access.read(buffer)
           } finally {
-            releaseLock()
+            access.close()
           }
         } else {
           const file = await fileHandle.getFile()
@@ -277,18 +272,13 @@ export default class OPFS {
 
               let buffer: Uint8Array
               if (this.useSync) {
-                const releaseLock = await fileLockManager.acquire(resolvedPath)
+                const access = await fileHandle.createSyncAccessHandle()
                 try {
-                  const access = await fileHandle.createSyncAccessHandle()
-                  try {
-                    const size = access.getSize()
-                    buffer = new Uint8Array(size)
-                    access.read(buffer)
-                  } finally {
-                    access.close()
-                  }
+                  const size = access.getSize()
+                  buffer = new Uint8Array(size)
+                  access.read(buffer)
                 } finally {
-                  releaseLock()
+                  access.close()
                 }
               } else {
                 const file = await fileHandle.getFile()
@@ -326,18 +316,13 @@ export default class OPFS {
       const buffer = typeof data === 'string' ? new TextEncoder().encode(data) : data
 
       if (this.useSync) {
-        const releaseLock = await fileLockManager.acquire(resolvedPath)
+        const access = await fileHandle!.createSyncAccessHandle()
         try {
-          const access = await fileHandle!.createSyncAccessHandle()
-          try {
-            // Set exact size (more efficient than truncate(0) + write)
-            access.truncate(buffer.length)
-            access.write(buffer, { at: 0 })
-          } finally {
-            access.close()
-          }
+          // Set exact size (more efficient than truncate(0) + write)
+          access.truncate(buffer.length)
+          access.write(buffer, { at: 0 })
         } finally {
-          releaseLock()
+          access.close()
         }
       } else {
         const writable = await fileHandle!.createWritable()
@@ -1060,16 +1045,11 @@ export default class OPFS {
       if (!fileHandle) throw createENOENT(path)
 
       if (this.useSync) {
-        const releaseLock = await fileLockManager.acquire(resolvedPath)
+        const access = await fileHandle.createSyncAccessHandle()
         try {
-          const access = await fileHandle.createSyncAccessHandle()
-          try {
-            access.truncate(len)
-          } finally {
-            access.close()
-          }
+          access.truncate(len)
         } finally {
-          releaseLock()
+          access.close()
         }
       } else {
         const file = await fileHandle.getFile()

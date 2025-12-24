@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.6] - 2025-12-24
+
+### Fixed
+- Removed FileLockManager - was causing severe performance degradation
+- Hybrid mode already prevents conflicts by using async APIs on main thread (useSync: false)
+- No locking needed since sync access handles are only used by one context at a time
+
 ## [1.2.5] - 2025-12-21
 
 ### Fixed
